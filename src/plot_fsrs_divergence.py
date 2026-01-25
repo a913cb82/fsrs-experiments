@@ -48,7 +48,7 @@ def calculate_metrics(
 
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     """
-    results: list of dicts with keys 'label', 'r_values', 'rmse', 'kl'
+    results: list of dicts with keys 'label', 'r_values', 'r_std', 'rmse', 'kl'
     """
     plt.figure(figsize=(12, 8))
 
@@ -58,13 +58,20 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     for res in results:
         label = res["label"]
         r_values = res["r_values"]
+        r_std = res.get("r_std")
 
         if label != "Ground Truth":
             rmse = res["rmse"]
             kl = res["kl"]
             label = f"{label} (avg RMSE: {rmse:.4f}, avg KL: {kl:.4f})"
 
-        plt.plot(t, r_values, label=label)
+        (line,) = plt.plot(t, r_values, label=label)
+
+        # Add shaded region for standard deviation
+        if r_std is not None and np.any(r_std > 0):
+            plt.fill_between(
+                t, r_values - r_std, r_values + r_std, color=line.get_color(), alpha=0.2
+            )
 
     plt.xlabel("Days since review")
     plt.ylabel("Probability of Recall (Retrievability)")
@@ -155,6 +162,7 @@ def main() -> None:
 
                     # Average the curves
                     avg_fit_r = np.mean(all_fit_r, axis=0)
+                    std_fit_r = np.std(all_fit_r, axis=0)
                     # Average the metrics
                     avg_rmse = float(np.mean(all_rmse))
                     avg_kl = float(np.mean(all_kl))
@@ -166,6 +174,7 @@ def main() -> None:
                         {
                             "label": label,
                             "r_values": avg_fit_r,
+                            "r_std": std_fit_r,
                             "rmse": avg_rmse,
                             "kl": avg_kl,
                         }
