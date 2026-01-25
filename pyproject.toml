@@ -12,10 +12,6 @@ dependencies = [
     "scipy",
 ]
 
-[project.scripts]
-fsrs-sim = "simulate_fsrs:run_simulation_cli"
-fsrs-plot = "plot_fsrs_divergence:main"
-
 [tool.ruff]
 line-length = 88
 target-version = "py310"

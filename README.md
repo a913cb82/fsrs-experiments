@@ -20,19 +20,19 @@ pip install .
 ### Running a basic simulation
 Run a simulation for a fixed number of days with a daily review limit.
 ```bash
-fsrs-sim --days 365 --reviews 200 --retention 0.9
+python src/simulate_fsrs.py --days 365 --reviews 200 --retention 0.9
 ```
 
 ### Using a Burn-in Period
 Run a simulation where the first 30 days use ground truth parameters for scheduling. After 30 days, FSRS parameters are fitted to the history and used for all subsequent scheduling.
 ```bash
-fsrs-sim --days 365 --burn-in 30
+python src/simulate_fsrs.py --days 365 --burn-in 30
 ```
 
 ### Plotting Divergence
 Compare multiple configurations (different day limits, burn-in periods, or retention schedules) in a single plot. You can run multiple repeats per configuration to average the results.
 ```bash
-fsrs-plot --days 100 200 --burn-ins 0 30 --retentions 0.85 0.95 --repeats 5
+python src/plot_fsrs_divergence.py --days 100 200 --burn-ins 0 30 --retentions 0.85 0.95 --repeats 5
 ```
 The resulting graph is saved as `forgetting_curve_divergence.png`. It shows the average forgetting curve across repeats and reports the average RMSE and KL divergence metrics.
 
