@@ -38,6 +38,8 @@ except ImportError:
         )
     except ImportError:
         # Fallback for direct execution when src is not in sys.path
+        import os
+
         sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         from simulate_fsrs import (
             DEFAULT_PARAMETERS,
@@ -84,12 +86,14 @@ def calculate_metrics(
 ) -> tuple[float, float]:
     """
     Calculate RMSE and Mean KL Divergence between ground truth and fitted curves,
-    averaged across all individual cards in the simulation.
+    averaged across all individual cards in the simulation using vectorization.
     """
     if not stabilities:
         return 0.0, 0.0
 
-    t_eval = np.linspace(0, 100, 200)
+    t_eval = np.linspace(0, 100, 200)  # Shape (T,)
+    s_nat = np.array([max(s[0], 0.001) for s in stabilities])  # Shape (N,)
+    s_alg = np.array([max(s[1], 0.001) for s in stabilities])  # Shape (N,)
 
     # Pre-calculate constants
     decay_nat = -gt_params[20]
@@ -97,27 +101,20 @@ def calculate_metrics(
     decay_alg = -fit_params[20]
     factor_alg = 0.9 ** (1 / decay_alg) - 1
 
-    all_rmse = []
-    all_kl = []
+    # Broadcast evaluation across time and population
+    # Resulting shape: (T, N)
+    r_nat = (1 + factor_nat * t_eval[:, np.newaxis] / s_nat[np.newaxis, :]) ** decay_nat
+    r_alg = (1 + factor_alg * t_eval[:, np.newaxis] / s_alg[np.newaxis, :]) ** decay_alg
 
-    for s_nat, s_alg in stabilities:
-        s_nat = max(s_nat, 0.001)
-        s_alg = max(s_alg, 0.001)
+    # RMSE per card: mean across time axis, then sqrt
+    rmse_per_card = np.sqrt(np.mean((r_nat - r_alg) ** 2, axis=0))
 
-        r_nat = (1 + factor_nat * t_eval / s_nat) ** decay_nat
-        r_alg = (1 + factor_alg * t_eval / s_alg) ** decay_alg
+    # KL Divergence per card
+    p = np.clip(r_nat, 1e-10, 1 - 1e-10)
+    q = np.clip(r_alg, 1e-10, 1 - 1e-10)
+    kl_per_card = np.mean(entropy(p, q, axis=0) + entropy(1 - p, 1 - q, axis=0))
 
-        # Per-card RMSE
-        rmse = np.sqrt(np.mean((r_nat - r_alg) ** 2))
-        all_rmse.append(rmse)
-
-        # Per-card KL
-        p = np.clip(r_nat, 1e-10, 1 - 1e-10)
-        q = np.clip(r_alg, 1e-10, 1 - 1e-10)
-        kl = entropy(p, q) + entropy(1 - p, 1 - q)
-        all_kl.append(np.mean(kl))
-
-    return float(np.mean(all_rmse)), float(np.mean(all_kl))
+    return float(np.mean(rmse_per_card)), float(kl_per_card)
 
 
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
@@ -167,8 +164,21 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     tqdm.write("Plot saved to forgetting_curve_divergence.png")
 
 
+# Global storage for worker processes to avoid pickling overhead
+_worker_seeded_data: dict[str, Any] | None = None
+
+
+def init_worker(seeded_payload: dict[str, Any] | None) -> None:
+    global _worker_seeded_data
+    _worker_seeded_data = seeded_payload
+
+
 def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
     try:
+        # Use globally initialized seeded data if available
+        # This drastically reduces IPC overhead for many repeats
+        s_data = task.get("seeded_data") or _worker_seeded_data
+
         fitted, gt, metrics = run_simulation(
             n_days=task["days"],
             review_limit=task["reviews"],
@@ -178,7 +188,7 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             seed=task["seed"],
             ground_truth=task.get("ground_truth"),
             initial_params=task.get("initial_params"),
-            seeded_data=task.get("seeded_data"),
+            seeded_data=s_data,
         )
         return {
             "config_key": task["config_key"],
@@ -273,7 +283,8 @@ def main() -> None:
                     "config_key": config_key,
                     "ground_truth": gt_params_input,
                     "initial_params": initial_params,
-                    "seeded_data": seeded_payload,
+                    # We pass None here because workers use global state
+                    "seeded_data": None,
                 }
             )
 
@@ -295,8 +306,11 @@ def main() -> None:
 
     tqdm.write(f"Starting {len(tasks)} simulations...")
 
+    # Start the pool with the initializer to share seeded history efficiently
     with concurrent.futures.ProcessPoolExecutor(
-        max_workers=args.concurrency
+        max_workers=args.concurrency,
+        initializer=init_worker,
+        initargs=(seeded_payload,),
     ) as executor:
         futures = {executor.submit(run_single_task, task): task for task in tasks}
         for future in tqdm(
@@ -312,6 +326,7 @@ def main() -> None:
                 key = res["config_key"]
 
                 # Metrics for this repeat: averaged across all cards
+                # This is now fully vectorized
                 rmse, kl = calculate_metrics(gt_params_res, fitted, stabilities)
 
                 # Calculate population curves for this run

@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 import os
 import random
 import sqlite3
@@ -10,6 +9,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
 from tqdm import tqdm
 
 # Ensure we can import fsrs if it's not in path for some reason
@@ -58,19 +58,31 @@ __all__ = [
 class RustOptimizer:
     """A wrapper for fsrs-rs-python to match our existing Optimizer interface."""
 
-    def __init__(self, review_logs: list[ReviewLog]):
+    def __init__(
+        self,
+        review_logs: list[ReviewLog],
+        pre_constructed_items: list[Any] | None = None,
+    ):
         self.review_logs = review_logs
+        self.pre_constructed_items = pre_constructed_items or []
 
     def compute_optimal_parameters(self, verbose: bool = False) -> list[float]:
         if not HAS_RUST_OPTIMIZER:
             raise ImportError("fsrs-rs-python not installed.")
 
         # Convert ReviewLog objects to Rust-compatible FSRSItem objects.
+        # We only process logs that aren't already covered by pre_constructed_items.
+        # For simplicity in this optimized version, if we have
+        # pre_constructed_items we assume they represent the static history
+        # and review_logs represent the NEW reviews.
+        # However, Anki optimization usually requires the FULL history per card.
+        # So we'll maintain the snapshots logic but allow passing them in.
+
         items_map: dict[int, list[ReviewLog]] = defaultdict(list)
         for log in self.review_logs:
             items_map[log.card_id].append(log)
 
-        rust_items = []
+        rust_items = list(self.pre_constructed_items)
         for card_id in items_map:
             # Sort logs for this card by date
             logs = sorted(items_map[card_id], key=lambda x: x.review_datetime)
@@ -176,14 +188,15 @@ def load_anki_history(
 
             t_cid = configs.get(str(deck_config_name)) if deck_config_name else None
 
-            # Map deck names to their resolved config IDs (handling inheritance)
-            d_name_map: dict[str, tuple[Any, ...]] = {str(row[1]): row for row in decks}
+            # Map deck names to their rows for inheritance lookup
+            d_name_map = {str(row[1]): row for row in decks}
 
             res_d_configs: dict[int, int] = {}
             for row in decks:
-                if row[0] is None or row[1] is None or row[2] is None:
+                if row[0] is None or row[1] is None:
                     continue
-                d_id, d_name, d_blob = int(row[0]), str(row[1]), bytes(row[2])
+                d_id, d_name, d_blob_raw = int(row[0]), str(row[1]), row[2]
+                d_blob = bytes(d_blob_raw) if d_blob_raw is not None else b""
                 c_id = get_deck_config_id(d_blob)
                 if c_id is None:
                     parts = d_name.split("::")
@@ -291,26 +304,29 @@ def load_anki_history(
 def simulate_day(
     nature_scheduler: Scheduler,
     algo_scheduler: Scheduler,
-    true_cards: dict[int, Card],
-    sys_cards: dict[int, Card],
+    true_cards: list[Card],
+    sys_cards: list[Card],
     card_logs: dict[int, list[ReviewLog]],
     current_date: datetime,
     review_limit: int,
 ) -> None:
-    due_cards = []
-    for card in sys_cards.values():
-        if card.due <= current_date:
-            due_cards.append(card)
+    # Use NumPy for fast due-check across the deck
+    # This replaces the O(N) Python loop scanner
+    dues = np.array([c.due for c in sys_cards])
+    due_mask = dues <= current_date
+    due_indices = np.where(due_mask)[0].tolist()
 
-    random.shuffle(due_cards)
+    random.shuffle(due_indices)
     reviews_done = 0
 
-    for sys_card in due_cards:
+    for idx in due_indices:
         if reviews_done >= review_limit:
             break
 
+        sys_card = sys_cards[idx]
+        true_card = true_cards[idx]
         card_id = sys_card.card_id
-        true_card = true_cards[card_id]
+
         retrievability = nature_scheduler.get_card_retrievability(
             true_card, current_date
         )
@@ -326,12 +342,12 @@ def simulate_day(
         updated_true_card, _ = nature_scheduler.review_card(
             true_card, rating, current_date
         )
-        true_cards[card_id] = updated_true_card
+        true_cards[idx] = updated_true_card
 
         updated_sys_card, log = algo_scheduler.review_card(
             sys_card, rating, current_date
         )
-        sys_cards[card_id] = updated_sys_card
+        sys_cards[idx] = updated_sys_card
 
         card_logs[card_id].append(log)
         reviews_done += 1
@@ -358,8 +374,8 @@ def simulate_day(
             sys_card, rating, current_date
         )
 
-        true_cards[updated_true_card.card_id] = updated_true_card
-        sys_cards[updated_sys_card.card_id] = updated_sys_card
+        true_cards.append(updated_true_card)
+        sys_cards.append(updated_sys_card)
         card_logs[updated_sys_card.card_id].append(log)
         reviews_done += 1
 
@@ -447,8 +463,8 @@ def run_simulation(
             desired_retention=initial_retention,
         )
 
-        true_cards: dict[int, Card] = {}
-        sys_cards: dict[int, Card] = {}
+        true_cards: list[Card] = []
+        sys_cards: list[Card] = []
         card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
         current_date = START_DATE
 
@@ -456,21 +472,19 @@ def run_simulation(
             # Use pre-calculated data
             current_date = seeded_data["last_rev"] + timedelta(days=1)
             # We must deepcopy card objects because they are
-            # modified in-place during simulation
-            true_cards = deepcopy(seeded_data["true_cards"])
-            sys_cards = deepcopy(seeded_data["sys_cards"])
+            # modified in-place during simulation.
+            # However, we convert the dict values to a list for O(1) NumPy access.
+            true_cards = list(deepcopy(seeded_data["true_cards"]).values())
+            sys_cards = list(deepcopy(seeded_data["sys_cards"]).values())
             card_logs = deepcopy(seeded_data["logs"])
         elif seed_history:
             # Fallback to loading from disk (e.g. single simulation run)
             logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
             for cid, logs_list in logs.items():
-                true_cards[cid] = nature_scheduler.reschedule_card(
-                    Card(card_id=cid), logs_list
-                )
-                sys_cards[cid] = algo_scheduler.reschedule_card(
-                    Card(card_id=cid), logs_list
-                )
+                card = Card(card_id=cid)
+                true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
+                sys_cards.append(algo_scheduler.reschedule_card(card, logs_list))
                 card_logs[cid].extend(logs_list)
 
         limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
@@ -509,9 +523,10 @@ def run_simulation(
                     parameters=tuple(fitted_bi),
                     desired_retention=algo_scheduler.desired_retention,
                 )
-                for cid in sys_cards:
-                    sys_cards[cid] = algo_scheduler.reschedule_card(
-                        sys_cards[cid], card_logs[cid]
+                # Reschedule with new params
+                for i, card in enumerate(sys_cards):
+                    sys_cards[i] = algo_scheduler.reschedule_card(
+                        Card(card_id=card.card_id), card_logs[card.card_id]
                     )
 
             pbar_p2 = (
@@ -540,17 +555,6 @@ def run_simulation(
                 current_date += timedelta(days=1)
 
         all_logs_final = [log for logs in card_logs.values() for log in logs]
-        total_retrievability = 0.0
-        end_date = current_date
-        log_prob_sum = 0.0
-
-        for card in true_cards.values():
-            r = nature_scheduler.get_card_retrievability(card, end_date)
-            total_retrievability += r
-            if r > 0:
-                log_prob_sum += math.log(r)
-            else:
-                log_prob_sum = -float("inf")
 
         fitted_params = None
         try:
@@ -562,10 +566,11 @@ def run_simulation(
         stabilities = []
         if fitted_params:
             final_algo_scheduler = Scheduler(parameters=tuple(fitted_params))
-            for cid in true_cards:
-                s_nat = true_cards[cid].stability or 0.0
+            for i in range(len(true_cards)):
+                card_id = true_cards[i].card_id
+                s_nat = true_cards[i].stability or 0.0
                 rescheduled = final_algo_scheduler.reschedule_card(
-                    Card(card_id=cid), card_logs[cid]
+                    Card(card_id=card_id), card_logs[card_id]
                 )
                 s_alg = rescheduled.stability or 0.0
                 stabilities.append((s_nat, s_alg))
@@ -574,8 +579,6 @@ def run_simulation(
             fitted_params,
             ground_truth_params,
             {
-                "total_retention": total_retrievability,
-                "log_prob_sum": log_prob_sum,
                 "review_count": len(all_logs_final),
                 "card_count": len(true_cards),
                 "stabilities": stabilities,
