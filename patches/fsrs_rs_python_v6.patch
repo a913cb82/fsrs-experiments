@@ -1,0 +1,225 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index deca128..ac6994a 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -327,7 +327,7 @@ dependencies = [
+  "libm",
+  "macerator",
+  "matrixmultiply",
+- "ndarray",
++ "ndarray 0.16.1",
+  "num-traits",
+  "paste",
+  "portable-atomic-util",
+@@ -1184,14 +1184,12 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
+ 
+ [[package]]
+ name = "fsrs"
+-version = "5.2.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "cab5f80c16d1d07e492a6828478ecb9f379f142ba6f19fa3b7955edd180ddc2e"
++version = "6.0.0"
+ dependencies = [
+  "burn",
+  "itertools",
+  "log",
+- "ndarray",
++ "ndarray 0.17.2",
+  "priority-queue",
+  "rand",
+  "rayon",
+@@ -1979,6 +1977,21 @@ dependencies = [
+  "rayon",
+ ]
+ 
++[[package]]
++name = "ndarray"
++version = "0.17.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
++dependencies = [
++ "matrixmultiply",
++ "num-complex",
++ "num-integer",
++ "num-traits",
++ "portable-atomic",
++ "portable-atomic-util",
++ "rawpointer",
++]
++
+ [[package]]
+ name = "ndk-sys"
+ version = "0.5.0+25.2.9519653"
+@@ -2285,13 +2298,13 @@ dependencies = [
+ 
+ [[package]]
+ name = "priority-queue"
+-version = "2.5.0"
++version = "2.7.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5676d703dda103cbb035b653a9f11448c0a7216c7926bd35fcb5865475d0c970"
++checksum = "93980406f12d9f8140ed5abe7155acb10bb1e69ea55c88960b9c2f117445ef96"
+ dependencies = [
+- "autocfg",
+  "equivalent",
+  "indexmap",
++ "serde",
+ ]
+ 
+ [[package]]
+@@ -2491,9 +2504,9 @@ checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
+ 
+ [[package]]
+ name = "rayon"
+-version = "1.10.0"
++version = "1.11.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b418a60154510ca1a002a752ca9714984e21e4241e804d32555251faf8b78ffa"
++checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+ dependencies = [
+  "either",
+  "rayon-core",
+@@ -2501,9 +2514,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rayon-core"
+-version = "1.12.1"
++version = "1.13.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1465873a3dfdaa8ae7cb14b4383657caab0b3e8a0aa9ae8e04b044854c8dfce2"
++checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+ dependencies = [
+  "crossbeam-deque",
+  "crossbeam-utils",
+@@ -2737,10 +2750,11 @@ checksum = "a3f0bf26fd526d2a95683cd0f87bf103b8539e2ca1ef48ce002d67aad59aa0b4"
+ 
+ [[package]]
+ name = "serde"
+-version = "1.0.219"
++version = "1.0.228"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5f0e2c6ed6606019b4e29e69dbaba95b11854410e5347d525002456dbbb786b6"
++checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
+ dependencies = [
++ "serde_core",
+  "serde_derive",
+ ]
+ 
+@@ -2753,11 +2767,20 @@ dependencies = [
+  "serde",
+ ]
+ 
++[[package]]
++name = "serde_core"
++version = "1.0.228"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "41d385c7d4ca58e59fc732af25c3983b67ac852c1a25000afe1175de458b67ad"
++dependencies = [
++ "serde_derive",
++]
++
+ [[package]]
+ name = "serde_derive"
+-version = "1.0.219"
++version = "1.0.228"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5b0276cf7f2c73365f7157c8123c21cd9a50fbbd844757af28ca1f5925fc2a00"
++checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -2811,18 +2834,18 @@ checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
+ 
+ [[package]]
+ name = "snafu"
+-version = "0.8.6"
++version = "0.8.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "320b01e011bf8d5d7a4a4a4be966d9160968935849c83b918827f6a435e7f627"
++checksum = "6e84b3f4eacbf3a1ce05eac6763b4d629d60cbc94d632e4092c54ade71f1e1a2"
+ dependencies = [
+  "snafu-derive",
+ ]
+ 
+ [[package]]
+ name = "snafu-derive"
+-version = "0.8.6"
++version = "0.8.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1961e2ef424c1424204d3a5d6975f934f56b6d50ff5732382d84ebf460e147f7"
++checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
+ dependencies = [
+  "heck",
+  "proc-macro2",
+diff --git a/Cargo.toml b/Cargo.toml
+index 7a08fc4..c5fa18d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -9,10 +9,8 @@ name = "fsrs_rs_python"
+ crate-type = ["cdylib"]
+ 
+ [dependencies.fsrs]
+-version = "5.2.0"
+-# path = "../fsrs-rs"
+-# git = "https://github.com/open-spaced-repetition/fsrs-rs.git"
+-# rev = "9b2f2f72f68e7fbddf1aff3ca0271d6ee26702e6"
++path = "../fsrs-rs-repo"
++# version = "5.2.0"
+ 
+ [dependencies]
+ pyo3 = "0.27.2"
+diff --git a/src/lib.rs b/src/lib.rs
+index e950d26..4280447 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -12,7 +12,7 @@ pub struct FSRS(Mutex<fsrs::FSRS>);
+ impl FSRS {
+     #[new]
+     pub fn new(parameters: Vec<f32>) -> Self {
+-        Self(fsrs::FSRS::new(Some(&parameters)).unwrap().into())
++        Self(fsrs::FSRS::new(&parameters).unwrap().into())
+     }
+     #[pyo3(signature=(current_memory_state,desired_retention,days_elapsed))]
+     pub fn next_states(
+@@ -34,19 +34,16 @@ impl FSRS {
+         )
+     }
+     pub fn compute_parameters(&self, train_set: Vec<FSRSItem>) -> Vec<f32> {
+-        self.0
+-            .lock()
+-            .unwrap()
+-            .compute_parameters(ComputeParametersInput {
+-                train_set: train_set.iter().map(|x| x.0.clone()).collect(),
+-                progress: None,
+-                enable_short_term: true,
+-                num_relearning_steps: None,
+-            })
+-            .unwrap_or_default()
++        fsrs::compute_parameters(ComputeParametersInput {
++            train_set: train_set.iter().map(|x| x.0.clone()).collect(),
++            progress: None,
++            enable_short_term: true,
++            num_relearning_steps: None,
++        })
++        .unwrap_or_default()
+     }
+     pub fn benchmark(&self, train_set: Vec<FSRSItem>) -> Vec<f32> {
+-        self.0.lock().unwrap().benchmark(ComputeParametersInput {
++        fsrs::benchmark(ComputeParametersInput {
+             train_set: train_set.iter().map(|x| x.0.clone()).collect(),
+             progress: None,
+             enable_short_term: true,
+@@ -252,9 +249,9 @@ fn fsrs_rs_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+     m.add(
+         "DEFAULT_PARAMETERS",
+         [
+-            0.40255, 1.18385, 3.173, 15.69105, 7.1949, 0.5345, 1.4604, 0.0046, 1.54575, 0.1192,
+-            1.01925, 1.9395, 0.11, 0.29605, 2.2698, 0.2315, 2.9898, 0.51655, 0.6621,
++            0.212, 1.2931, 2.3065, 8.2956, 6.4133, 0.8334, 3.0194, 0.001, 1.8722, 0.1666, 0.796,
++            1.4835, 0.0614, 0.2629, 1.6483, 0.6014, 1.8729, 0.5425, 0.0912, 0.0658, 0.1542,
+         ],
+     )?;
+     Ok(())
+-}
++}
+\ No newline at end of file

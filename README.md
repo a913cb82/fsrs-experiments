@@ -36,6 +36,26 @@ python src/plot_fsrs_divergence.py --days 100 200 --burn-ins 0 30 --retentions 0
 ```
 The resulting graph is saved as `forgetting_curve_divergence.png`. It shows the average forgetting curve across repeats and reports the average RMSE and KL divergence metrics.
 
+## High-Performance Backend (Optional but Recommended)
+
+For large-scale simulations, this project supports a Rust-powered backend which is ~20x faster than the default PyTorch optimizer. To set it up:
+
+1. **Install Rust**:
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+2. **Run the setup script**:
+   This clones the required FSRS repositories and applies git patches for FSRS-6 compatibility.
+   ```bash
+   ./scripts/setup_rust_backend.sh
+   ```
+3. **Build the bindings**:
+   ```bash
+   cd fsrs-rs-python-repo
+   pip install maturin
+   maturin develop --release
+   ```
+
 ## Development
 
 This project uses `ruff` for linting and formatting, and `mypy` for type checking. Configuration for these tools can be found in `pyproject.toml`.
