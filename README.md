@@ -30,11 +30,11 @@ fsrs-sim --days 365 --burn-in 30
 ```
 
 ### Plotting Divergence
-Compare multiple configurations (different day limits, burn-in periods, or retention schedules) in a single plot.
+Compare multiple configurations (different day limits, burn-in periods, or retention schedules) in a single plot. You can run multiple repeats per configuration to average the results.
 ```bash
-fsrs-plot --days 100 200 --burn-ins 0 30 --retentions 0.85 0.95
+fsrs-plot --days 100 200 --burn-ins 0 30 --retentions 0.85 0.95 --repeats 5
 ```
-The resulting graph is saved as `forgetting_curve_divergence.png`.
+The resulting graph is saved as `forgetting_curve_divergence.png`. It shows the average forgetting curve across repeats and reports the average RMSE and KL divergence metrics.
 
 ## Development
 

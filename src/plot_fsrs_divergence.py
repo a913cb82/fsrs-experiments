@@ -48,30 +48,21 @@ def calculate_metrics(
 
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     """
-    results: list of dicts with keys 'label', 'params'
+    results: list of dicts with keys 'label', 'r_values', 'rmse', 'kl'
     """
     plt.figure(figsize=(12, 8))
 
     # Time range (days)
     t = np.linspace(0, 100, 200)
-    gt_res = next(r for r in results if r["label"] == "Ground Truth")
-    gt_params = gt_res["params"]
-    gt_stability = gt_params[2]
-    gt_r = calculate_retrievability(t, gt_stability, gt_params)
 
     for res in results:
         label = res["label"]
-        params = res["params"]
-
-        # Scenario: First review was 'Good'
-        # Stability = parameters[2] (for Good=3)
-        stability = params[2]
-
-        r_values = calculate_retrievability(t, stability, params)
+        r_values = res["r_values"]
 
         if label != "Ground Truth":
-            rmse, kl = calculate_metrics(gt_r, r_values)
-            label = f"{label} (RMSE: {rmse:.4f}, KL: {kl:.4f})"
+            rmse = res["rmse"]
+            kl = res["kl"]
+            label = f"{label} (avg RMSE: {rmse:.4f}, avg KL: {kl:.4f})"
 
         plt.plot(t, r_values, label=label)
 
@@ -102,11 +93,19 @@ def main() -> None:
     parser.add_argument(
         "--burn-ins", type=int, nargs="+", default=[0], help="List of burn-in periods"
     )
+    parser.add_argument(
+        "--repeats", type=int, default=1, help="Number of repeats per config"
+    )
 
     args = parser.parse_args()
 
     results = []
-    ground_truth_captured = False
+    t_eval = np.linspace(0, 100, 200)
+
+    # Capture Ground Truth once
+    _, gt_params, _ = run_simulation(n_days=1, verbose=False)
+    gt_r = calculate_retrievability(t_eval, gt_params[2], gt_params)
+    results.append({"label": "Ground Truth", "r_values": gt_r})
 
     # Iterate over all combinations
     for burn_in in args.burn_ins:
@@ -115,44 +114,68 @@ def main() -> None:
                 for retention in args.retentions:
                     print(
                         f"Running config: Days={days}, Reviews={reviews}, "
-                        f"Retention={retention}, Burn-in={burn_in}"
+                        f"Retention={retention}, Burn-in={burn_in}, "
+                        f"Repeats={args.repeats}"
                     )
-                    try:
-                        fitted, gt, _metrics = run_simulation(
-                            n_days=days,
-                            review_limit=reviews,
-                            retention=retention,
-                            burn_in_days=burn_in,
-                            verbose=False,
-                        )
 
-                        if fitted is None:
-                            print("Optimization failed. Skipping.")
-                            continue
+                    all_fit_r = []
+                    all_rmse = []
+                    all_kl = []
 
-                        if not ground_truth_captured:
-                            results.append({"label": "Ground Truth", "params": gt})
-                            ground_truth_captured = True
+                    for i in range(args.repeats):
+                        try:
+                            # Use different seed for each repeat
+                            fitted, gt, _metrics = run_simulation(
+                                n_days=days,
+                                review_limit=reviews,
+                                retention=retention,
+                                burn_in_days=burn_in,
+                                verbose=False,
+                                seed=42 + i,
+                            )
 
-                        label = (
-                            f"Fit (D={days}, R={reviews}, "
-                            f"Ret={retention}, BI={burn_in})"
-                        )
-                        results.append({"label": label, "params": fitted})
+                            if fitted is None:
+                                print(f"Repeat {i} optimization failed. Skipping.")
+                                continue
 
-                        # Calculate metrics against ground truth
-                        t_eval = np.linspace(0, 100, 200)
-                        gt_r = calculate_retrievability(t_eval, gt[2], gt)
-                        fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
-                        rmse, kl = calculate_metrics(gt_r, fit_r)
+                            fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
+                            rmse, kl = calculate_metrics(gt_r, fit_r)
 
-                        print(f"Completed config. RMSE: {rmse:.6f}, KL: {kl:.6f}")
+                            all_fit_r.append(fit_r)
+                            all_rmse.append(rmse)
+                            all_kl.append(kl)
 
-                    except Exception as e:
-                        print(f"Simulation failed for config: {e}")
-                        traceback.print_exc()
+                        except Exception as e:
+                            print(f"Repeat {i} failed for config: {e}")
+                            traceback.print_exc()
 
-    if len(results) > 0:
+                    if not all_fit_r:
+                        print("All repeats failed for this config. Skipping.")
+                        continue
+
+                    # Average the curves
+                    avg_fit_r = np.mean(all_fit_r, axis=0)
+                    # Average the metrics
+                    avg_rmse = float(np.mean(all_rmse))
+                    avg_kl = float(np.mean(all_kl))
+
+                    label = (
+                        f"Fit (D={days}, R={reviews}, Ret={retention}, BI={burn_in})"
+                    )
+                    results.append(
+                        {
+                            "label": label,
+                            "r_values": avg_fit_r,
+                            "rmse": avg_rmse,
+                            "kl": avg_kl,
+                        }
+                    )
+                    print(
+                        f"Completed config. avg RMSE: {avg_rmse:.6f}, "
+                        f"avg KL: {avg_kl:.6f}"
+                    )
+
+    if len(results) > 1:
         plot_forgetting_curves(results)
     else:
         print("No results to plot.")

@@ -160,7 +160,6 @@ def get_retention_for_day(
     day: int, schedule_segments: list[tuple[int, float]]
 ) -> float:
     total_duration = sum(d for d, r in schedule_segments)
-
     day_in_cycle = day % total_duration
 
     current_pos = 0
@@ -177,6 +176,7 @@ def run_simulation(
     review_limit: int = 200,
     retention: str = "0.9",
     verbose: bool = True,
+    seed: int = 42,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
@@ -185,15 +185,15 @@ def run_simulation(
         burn_in_info = f", Burn-in: {burn_in_days} days" if burn_in_days > 0 else ""
         print(
             f"Starting simulation: {n_days} days{burn_in_info}, "
-            f"{review_limit} reviews/day, Retention: {retention}"
+            f"{review_limit} reviews/day, Retention: {retention}, Seed: {seed}"
         )
 
     # Set seed for reproducibility
-    random.seed(42)
+    random.seed(seed)
     try:
         import torch
 
-        torch.manual_seed(42)
+        torch.manual_seed(seed)
     except ImportError:
         pass
 
@@ -366,18 +366,15 @@ def run_simulation(
 
 def run_simulation_cli() -> None:
     parser = argparse.ArgumentParser(description="Run FSRS Simulation")
-
     parser.add_argument(
         "--days", type=int, default=365, help="Number of days to simulate"
     )
-
     parser.add_argument("--reviews", type=int, default=200, help="Daily review limit")
-
     parser.add_argument(
         "--retention", type=str, default="0.9", help="Retention (float or schedule)"
     )
-
     parser.add_argument("--burn-in", type=int, default=0, help="Burn-in days")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
 
     args = parser.parse_args()
 
@@ -386,6 +383,7 @@ def run_simulation_cli() -> None:
         review_limit=args.reviews,
         retention=args.retention,
         burn_in_days=args.burn_in,
+        seed=args.seed,
     )
 
 
