@@ -10,7 +10,7 @@ import numpy as np
 from scipy.stats import entropy
 from tqdm import tqdm
 
-from simulate_fsrs import run_simulation
+from simulate_fsrs import parse_parameters, run_simulation
 
 
 def calculate_retrievability(
@@ -88,6 +88,7 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             burn_in_days=task["burn_in"],
             verbose=False,  # Disable inner logs in parallel
             seed=task["seed"],
+            ground_truth=task.get("ground_truth"),
         )
         return {
             "config_key": task["config_key"],
@@ -107,8 +108,11 @@ def main() -> None:
     parser.add_argument("--burn-ins", type=int, nargs="+", default=[0])
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=multiprocessing.cpu_count())
+    parser.add_argument("--ground-truth", type=str, help="Comma-separated parameters")
 
     args = parser.parse_args()
+
+    gt_params_input = parse_parameters(args.ground_truth) if args.ground_truth else None
 
     # Flatten configurations into individual tasks
     tasks = []
@@ -125,11 +129,14 @@ def main() -> None:
                     "retention": retention,
                     "seed": 42 + i,
                     "config_key": config_key,
+                    "ground_truth": gt_params_input,
                 }
             )
 
     t_eval = np.linspace(0, 100, 200)
-    _, gt_params, _ = run_simulation(n_days=1, verbose=False)
+    _, gt_params, _ = run_simulation(
+        n_days=1, verbose=False, ground_truth=gt_params_input
+    )
     gt_r = calculate_retrievability(t_eval, gt_params[2], gt_params)
 
     # Map to store list of fit_r for each config

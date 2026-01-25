@@ -51,7 +51,6 @@ class RustOptimizer:
 
         # Convert ReviewLog objects to Rust-compatible FSRSItem objects.
         # CRITICAL: FSRS-rs expects one FSRSItem per review (after the first).
-        # Each item contains the history UP TO that review.
         items_map = defaultdict(list)
         for log in self.review_logs:
             items_map[log.card_id].append(log)
@@ -61,7 +60,7 @@ class RustOptimizer:
             # Sort logs for this card by date
             logs = sorted(items_map[card_id], key=lambda x: x.review_datetime)
 
-            # We need at least 2 reviews to create a training sample (1st is initial)
+            # We need at least 2 reviews to create a training sample
             if len(logs) < 2:
                 continue
 
@@ -80,7 +79,6 @@ class RustOptimizer:
                 last_date = log.review_datetime
 
             # Create one FSRSItem for every review from the 2nd one onwards
-            # Each item contains the history of reviews up to that point.
             for i in range(2, len(all_reviews) + 1):
                 item_history = all_reviews[:i]
                 rust_items.append(fsrs_rs_python.FSRSItem(item_history))
@@ -138,13 +136,13 @@ def simulate_day(
             # Fail
             rating = Rating.Again
 
-        # Update NATURE state (updates P(Recall) for future)
+        # Update NATURE state
         updated_true_card, _ = nature_scheduler.review_card(
             true_card, rating, current_date
         )
         true_cards[card_id] = updated_true_card
 
-        # Update SYSTEM state (calculates interval using Algo Params)
+        # Update SYSTEM state
         updated_sys_card, log = algo_scheduler.review_card(
             sys_card, rating, current_date
         )
@@ -221,6 +219,21 @@ def get_retention_for_day(
     return schedule_segments[-1][1]
 
 
+def parse_parameters(params_str: str) -> tuple[float, ...]:
+    """Parses a comma-separated string of parameters into a tuple of floats."""
+    try:
+        parts = [float(p.strip()) for p in params_str.split(",")]
+        if len(parts) != 21:
+            tqdm.write(
+                f"Warning: Expected 21 parameters, got {len(parts)}. Using defaults."
+            )
+            return tuple(DEFAULT_PARAMETERS)
+        return tuple(parts)
+    except ValueError:
+        tqdm.write(f"Invalid parameter format: {params_str}. Using defaults.")
+        return tuple(DEFAULT_PARAMETERS)
+
+
 def run_simulation(
     n_days: int = 365,
     burn_in_days: int = 0,
@@ -229,6 +242,7 @@ def run_simulation(
     verbose: bool = True,
     seed: int = 42,
     tqdm_pos: int = 0,
+    ground_truth: tuple[float, ...] | None = None,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
@@ -243,85 +257,59 @@ def run_simulation(
     # Set seed for reproducibility
     random.seed(seed)
 
-    ground_truth_params = DEFAULT_PARAMETERS
-
-    nature_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=initial_retention
+    ground_truth_params = (
+        ground_truth if ground_truth is not None else DEFAULT_PARAMETERS
     )
 
-    algo_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=initial_retention
-    )
+    # Monkeypatch Optimizer's tqdm to respect position
+    import fsrs.optimizer
 
-    true_cards: dict[int, Card] = {}
-    sys_cards: dict[int, Card] = {}
-    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
+    original_optimizer_tqdm = fsrs.optimizer.tqdm
 
-    current_date = START_DATE
-    limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
+    def patched_tqdm(*args: Any, **kwargs: Any) -> Any:
+        if "position" not in kwargs:
+            kwargs["position"] = tqdm_pos + 1
+        if "leave" not in kwargs:
+            kwargs["leave"] = False
+        return original_optimizer_tqdm(*args, **kwargs)
 
-    pbar_p1 = (
-        tqdm(
-            range(limit_phase_1),
-            desc="Simulating (P1)",
-            position=tqdm_pos,
-            leave=False,
-            disable=not verbose,
+    fsrs.optimizer.tqdm = patched_tqdm
+
+    try:
+        # Nature Scheduler: Always Ground Truth
+        nature_scheduler = Scheduler(
+            parameters=ground_truth_params, desired_retention=initial_retention
         )
-        if verbose
-        else range(limit_phase_1)
-    )
 
-    for day in pbar_p1:
-        daily_retention = get_retention_for_day(day, parsed_schedule)
-        algo_scheduler.desired_retention = daily_retention
-
-        simulate_day(
-            nature_scheduler,
-            algo_scheduler,
-            true_cards,
-            sys_cards,
-            card_logs,
-            current_date,
-            review_limit,
+        # Algo Scheduler: Initially Ground Truth, changes after burn-in
+        algo_scheduler = Scheduler(
+            parameters=ground_truth_params, desired_retention=initial_retention
         )
-        current_date += timedelta(days=1)
 
-    if burn_in_days > 0 and burn_in_days < n_days:
-        all_logs = [log for logs in card_logs.values() for log in logs]
+        # Two maps to track divergent states
+        true_cards: dict[int, Card] = {}  # ID -> Card (Nature State)
+        sys_cards: dict[int, Card] = {}  # ID -> Card (Algo State)
 
-        if len(all_logs) >= 512:
-            try:
-                # Use Rust optimizer
-                optimizer = RustOptimizer(all_logs)
-                fitted_bi = optimizer.compute_optimal_parameters(verbose=verbose)
+        card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
 
-                algo_scheduler = Scheduler(
-                    parameters=tuple(fitted_bi),
-                    desired_retention=algo_scheduler.desired_retention,
-                )
+        current_date = START_DATE
 
-                for cid in sys_cards:
-                    sys_cards[cid] = algo_scheduler.reschedule_card(
-                        sys_cards[cid], card_logs[cid]
-                    )
+        # PHASE 1: Burn-in (or full run if burn_in_days=0)
+        limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
 
-            except Exception as e:
-                if verbose:
-                    tqdm.write(f"Burn-in optimization failed: {e}")
-
-        pbar_p2 = (
+        pbar_p1 = (
             tqdm(
-                range(burn_in_days, n_days),
-                desc="Simulating (P2)",
+                range(limit_phase_1),
+                desc="Simulating (P1)",
                 position=tqdm_pos,
                 leave=False,
                 disable=not verbose,
             )
             if verbose
-            else range(burn_in_days, n_days)
+            else range(limit_phase_1)
         )
-        for day in pbar_p2:
+
+        for day in pbar_p1:
             daily_retention = get_retention_for_day(day, parsed_schedule)
             algo_scheduler.desired_retention = daily_retention
 
@@ -336,50 +324,118 @@ def run_simulation(
             )
             current_date += timedelta(days=1)
 
-    all_logs = [log for logs in card_logs.values() for log in logs]
+        # PHASE 2: After burn-in
+        if burn_in_days > 0 and burn_in_days < n_days:
+            # Flatten logs for optimizer
+            all_logs = [log for logs in card_logs.values() for log in logs]
 
-    total_retrievability = 0.0
-    end_date = current_date
-    log_prob_sum = 0.0
+            if len(all_logs) >= 512:
+                try:
+                    optimizer = RustOptimizer(all_logs)
+                    fitted_bi = optimizer.compute_optimal_parameters(verbose=verbose)
 
-    for card in true_cards.values():
-        r = nature_scheduler.get_card_retrievability(card, end_date)
-        total_retrievability += r
-        if r > 0:
-            log_prob_sum += math.log(r)
-        else:
-            log_prob_sum = -float("inf")
+                    # Update Algo Scheduler with fitted params
+                    algo_scheduler = Scheduler(
+                        parameters=tuple(fitted_bi),
+                        desired_retention=algo_scheduler.desired_retention,
+                    )
 
-    fitted_params: list[float] | None = None
-    try:
-        optimizer = RustOptimizer(all_logs)
-        fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
+                    # Reschedule existing cards
+                    for cid in sys_cards:
+                        sys_cards[cid] = algo_scheduler.reschedule_card(
+                            sys_cards[cid], card_logs[cid]
+                        )
 
-    except Exception as e:
-        if verbose:
-            tqdm.write(f"Error during final optimization: {e}")
+                except Exception as e:
+                    if verbose:
+                        tqdm.write(f"Burn-in optimization failed: {e}")
 
-    return (
-        fitted_params,
-        ground_truth_params,
-        {
-            "total_retention": total_retrievability,
-            "log_prob_sum": log_prob_sum,
-            "review_count": len(all_logs),
-            "card_count": len(true_cards),
-        },
-    )
+            # Resume simulation
+            pbar_p2 = (
+                tqdm(
+                    range(burn_in_days, n_days),
+                    desc="Simulating (P2)",
+                    position=tqdm_pos,
+                    leave=False,
+                    disable=not verbose,
+                )
+                if verbose
+                else range(burn_in_days, n_days)
+            )
+            for day in pbar_p2:
+                daily_retention = get_retention_for_day(day, parsed_schedule)
+                algo_scheduler.desired_retention = daily_retention
+
+                simulate_day(
+                    nature_scheduler,
+                    algo_scheduler,
+                    true_cards,
+                    sys_cards,
+                    card_logs,
+                    current_date,
+                    review_limit,
+                )
+                current_date += timedelta(days=1)
+
+        # End of simulation
+        all_logs = [log for logs in card_logs.values() for log in logs]
+
+        # Calculate memorized over time using TRUE cards (Nature)
+        total_retrievability = 0.0
+        end_date = current_date
+        log_prob_sum = 0.0
+
+        for card in true_cards.values():
+            r = nature_scheduler.get_card_retrievability(card, end_date)
+            total_retrievability += r
+            if r > 0:
+                log_prob_sum += math.log(r)
+            else:
+                log_prob_sum = -float("inf")
+
+        # Fit FSRS parameters
+        fitted_params: list[float] | None = None
+        try:
+            optimizer = RustOptimizer(all_logs)
+            fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
+
+        except Exception as e:
+            if verbose:
+                tqdm.write(f"Error during final optimization: {e}")
+
+        return (
+            fitted_params,
+            ground_truth_params,
+            {
+                "total_retention": total_retrievability,
+                "log_prob_sum": log_prob_sum,
+                "review_count": len(all_logs),
+                "card_count": len(true_cards),
+            },
+        )
+    finally:
+        # Restore original tqdm
+        fsrs.optimizer.tqdm = original_optimizer_tqdm
 
 
 def run_simulation_cli() -> None:
     parser = argparse.ArgumentParser(description="Run FSRS Simulation")
-    parser.add_argument("--days", type=int, default=365)
-    parser.add_argument("--reviews", type=int, default=200)
-    parser.add_argument("--retention", type=str, default="0.9")
-    parser.add_argument("--burn-in", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--days", type=int, default=365, help="Number of days to simulate"
+    )
+    parser.add_argument("--reviews", type=int, default=200, help="Daily review limit")
+    parser.add_argument(
+        "--retention", type=str, default="0.9", help="Retention (float or schedule)"
+    )
+    parser.add_argument("--burn-in", type=int, default=0, help="Burn-in days")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--ground-truth", type=str, help="Comma-separated FSRS-6 parameters"
+    )
 
     args = parser.parse_args()
+
+    gt_params = parse_parameters(args.ground_truth) if args.ground_truth else None
 
     run_simulation(
         n_days=args.days,
@@ -387,6 +443,7 @@ def run_simulation_cli() -> None:
         retention=args.retention,
         burn_in_days=args.burn_in,
         seed=args.seed,
+        ground_truth=gt_params,
     )
 
 
