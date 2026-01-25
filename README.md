@@ -2,10 +2,13 @@
 
 A simulator and analysis toolset for studying how fitted FSRS parameters diverge from ground truth under various conditions, such as different target retentions, burn-in periods, and retention schedules.
 
-## Files
+## Core Features
 
-- `src/simulate_fsrs.py`: Core simulation engine.
-- `src/plot_fsrs_divergence.py`: CLI tool to run and plot simulations.
+- **Population Analysis**: Visualizes **Aggregate Deck Forgetting Curves**, comparing "Actual Knowledge" (Nature) vs. "Predicted Knowledge" (Model) across your entire deck.
+- **Seeded Simulations**: Initialize simulations using your real Anki review history (`collection.anki2`).
+- **High Performance**: Native Rust backend support for ~20x faster parameter fitting.
+- **Statistical Rigor**: Supports multiple repeats with averaging and standard deviation shading for stable results.
+- **Advanced Metrics**: Calculates per-card RMSE and KL Divergence averaged across the population.
 
 ## Requirements
 
@@ -17,60 +20,55 @@ pip install .
 
 ## Usage
 
-### Running a basic simulation
-Run a simulation for a fixed number of days with a daily review limit.
-```bash
-python src/simulate_fsrs.py --days 365 --reviews 200 --retention 0.9
-```
-
-### Using a Burn-in Period
-Run a simulation where the first 30 days use ground truth parameters for scheduling. After 30 days, FSRS parameters are fitted to the history and used for all subsequent scheduling.
-```bash
-python src/simulate_fsrs.py --days 365 --burn-in 30
-```
-
 ### Plotting Divergence
-Compare multiple configurations (different day limits, burn-in periods, or retention schedules) in a single plot. You can run multiple repeats per configuration to average the results.
+The primary tool is `src/plot_fsrs_divergence.py`. It runs a cross-product of all provided arguments.
+
 ```bash
-python src/plot_fsrs_divergence.py --days 100 200 --burn-ins 0 30 --retentions 0.85 0.95 --repeats 5
+python src/plot_fsrs_divergence.py \
+    --days 30 60 \
+    --retentions 0.85 0.95 \
+    --repeats 5 \
+    --concurrency 8
 ```
-The resulting graph is saved as `forgetting_curve_divergence.png`. It shows the average forgetting curve across repeats and reports the average RMSE and KL divergence metrics.
 
-## High-Performance Backend (Optional but Recommended)
+### Advanced Options
 
-For large-scale simulations, this project supports a Rust-powered backend which is ~20x faster than the default PyTorch optimizer. To set it up:
+- **Seed from Anki**: Load real review history and filter by deck configuration.
+  ```bash
+  --seed-history collection.anki2 --deck-config "Default"
+  ```
+- **Custom Ground Truth**: Set the "natural" parameters your brain is simulated to follow.
+  ```bash
+  --ground-truth "0.4,1.2,3.2,15.7,7.2,0.5,1.5,0.005,1.5,0.1,1.0,1.9,0.1,0.3,2.3,0.2,3.0,0.5,0.7,0.0,0.15"
+  ```
+- **Burn-in Period**: accumulating data with ground-truth scheduling before the model starts fitting.
+  ```bash
+  --burn-ins 30 60
+  ```
+
+## High-Performance Backend (Recommended)
+
+This project supports a Rust-powered backend which is significantly faster than the default PyTorch optimizer.
 
 1. **Install Rust**:
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
-2. **Run the setup script**:
-   This clones the required FSRS repositories and applies git patches for FSRS-6 compatibility.
+2. **Setup and Patch**:
    ```bash
    ./scripts/setup_rust_backend.sh
    ```
-3. **Build the bindings**:
+3. **Build Bindings**:
    ```bash
-   cd fsrs-rs-python-repo
-   pip install maturin
-   maturin develop --release
+   cd fsrs-rs-python-repo && maturin develop --release
    ```
 
 ## Development
 
-This project uses `ruff` for linting and formatting, and `mypy` for type checking. Configuration for these tools can be found in `pyproject.toml`.
-
-### Pre-commit Hooks
-
-To ensure code quality, pre-commit hooks are configured. To set them up, run:
+This project uses `ruff` for linting/formatting and `mypy` for type checking.
 
 ```bash
 pip install pre-commit
 pre-commit install
-```
-
-You can run the hooks manually on all files with:
-
-```bash
 pre-commit run --all-files
 ```
