@@ -364,15 +364,19 @@ def run_simulation(
     )
 
 
-if __name__ == "__main__":
+def run_simulation_cli() -> None:
     parser = argparse.ArgumentParser(description="Run FSRS Simulation")
+
     parser.add_argument(
         "--days", type=int, default=365, help="Number of days to simulate"
     )
+
     parser.add_argument("--reviews", type=int, default=200, help="Daily review limit")
+
     parser.add_argument(
         "--retention", type=str, default="0.9", help="Retention (float or schedule)"
     )
+
     parser.add_argument("--burn-in", type=int, default=0, help="Burn-in days")
 
     args = parser.parse_args()
@@ -383,3 +387,7 @@ if __name__ == "__main__":
         retention=args.retention,
         burn_in_days=args.burn_in,
     )
+
+
+if __name__ == "__main__":
+    run_simulation_cli()
