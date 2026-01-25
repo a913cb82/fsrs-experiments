@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: fsrs-experiments
+Version: 0.1.0
+Summary: FSRS Divergence Experiments
+Requires-Python: >=3.10
+Requires-Dist: fsrs
+Requires-Dist: torch
+Requires-Dist: pandas
+Requires-Dist: tqdm
+Requires-Dist: matplotlib
+Requires-Dist: scipy

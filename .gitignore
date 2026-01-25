@@ -12,6 +12,11 @@ ENV/
 .vscode/
 .idea/
 
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
 # Project specific
 forgetting_curve_divergence.png
 py-fsrs-repo/

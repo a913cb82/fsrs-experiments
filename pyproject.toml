@@ -9,6 +9,7 @@ dependencies = [
     "pandas",
     "tqdm",
     "matplotlib",
+    "scipy",
 ]
 
 [tool.ruff]
@@ -43,3 +44,6 @@ module = [
     "tqdm.*"
 ]
 ignore_missing_imports = true
+
+[tool.setuptools]
+py-modules = ["simulate_fsrs", "plot_fsrs_divergence"]

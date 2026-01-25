@@ -25,6 +25,27 @@ def calculate_retrievability(
     return res
 
 
+def calculate_metrics(
+    gt_r: np.ndarray[Any, Any], fitted_r: np.ndarray[Any, Any]
+) -> tuple[float, float]:
+    """
+    Calculate RMSE and Mean KL Divergence between ground truth and fitted curves.
+    KL divergence is calculated between Bernoulli distributions at each time point.
+    """
+    # RMSE
+    rmse = float(np.sqrt(np.mean((gt_r - fitted_r) ** 2)))
+
+    # KL Divergence between Bernoulli distributions at each t
+    # p = ground truth, q = fitted
+    p = np.clip(gt_r, 1e-10, 1 - 1e-10)
+    q = np.clip(fitted_r, 1e-10, 1 - 1e-10)
+
+    kl = p * np.log(p / q) + (1 - p) * np.log((1 - p) / (1 - q))
+    mean_kl = float(np.mean(kl))
+
+    return rmse, mean_kl
+
+
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     """
     results: list of dicts with keys 'label', 'params'
@@ -33,6 +54,10 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
 
     # Time range (days)
     t = np.linspace(0, 100, 200)
+    gt_res = next(r for r in results if r["label"] == "Ground Truth")
+    gt_params = gt_res["params"]
+    gt_stability = gt_params[2]
+    gt_r = calculate_retrievability(t, gt_stability, gt_params)
 
     for res in results:
         label = res["label"]
@@ -43,6 +68,11 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
         stability = params[2]
 
         r_values = calculate_retrievability(t, stability, params)
+
+        if label != "Ground Truth":
+            rmse, kl = calculate_metrics(gt_r, r_values)
+            label = f"{label} (RMSE: {rmse:.4f}, KL: {kl:.4f})"
+
         plt.plot(t, r_values, label=label)
 
     plt.xlabel("Days since review")
@@ -109,10 +139,14 @@ def main() -> None:
                             f"Ret={retention}, BI={burn_in})"
                         )
                         results.append({"label": label, "params": fitted})
-                        mse = sum(
-                            (f - g) ** 2 for f, g in zip(fitted, gt, strict=False)
-                        ) / len(fitted)
-                        print(f"Completed config. MSE: {mse:.6f}")
+
+                        # Calculate metrics against ground truth
+                        t_eval = np.linspace(0, 100, 200)
+                        gt_r = calculate_retrievability(t_eval, gt[2], gt)
+                        fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
+                        rmse, kl = calculate_metrics(gt_r, fit_r)
+
+                        print(f"Completed config. RMSE: {rmse:.6f}, KL: {kl:.6f}")
 
                     except Exception as e:
                         print(f"Simulation failed for config: {e}")
