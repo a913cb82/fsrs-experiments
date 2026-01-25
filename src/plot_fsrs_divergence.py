@@ -29,8 +29,6 @@ def calculate_population_retrievability(
     decay = -parameters[20]
     factor = 0.9 ** (1 / decay) - 1
 
-    # stabilities shape: (N,)
-    # t shape: (T,)
     s_safe = np.maximum(stabilities, 0.001)
 
     # Broadcast: (T, 1) and (1, N) -> (T, N)
@@ -101,14 +99,14 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
         rmse = res["rmse"]
         kl = res["kl"]
 
-        # Plot Algo (Solid)
+        # Plot Model (Solid)
         algo_label = f"{label} (avg RMSE: {rmse:.4f}, KL: {kl:.4f})"
         (line,) = plt.plot(t, r_fit, label=algo_label, linestyle="-")
 
         # Plot Nature (Dashed, same color)
         plt.plot(t, r_nat, linestyle="--", color=line.get_color(), alpha=0.6)
 
-        # Shading for repeat variability (of the fitted curve)
+        # Shading for repeat variability
         if r_fit_std is not None and np.any(r_fit_std > 0):
             plt.fill_between(
                 t,
@@ -118,13 +116,13 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
                 alpha=0.15,
             )
 
-    # Add a dummy entry for the legend to explain styles
+    # Explain styles
     plt.plot([], [], color="gray", linestyle="-", label="Model (Predicted)")
     plt.plot([], [], color="gray", linestyle="--", label="Nature (Actual)")
 
     plt.xlabel("Days since end of simulation")
     plt.ylabel("Aggregate Expected Retention")
-    plt.title("Aggregate Forgetting Curve Divergence (Deck Population Average)")
+    plt.title("Aggregate Forgetting Curve Divergence")
     plt.legend(fontsize="small", ncol=1)
     plt.grid(True, alpha=0.3)
     plt.savefig("forgetting_curve_divergence.png")
@@ -141,6 +139,7 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             verbose=False,
             seed=task["seed"],
             ground_truth=task.get("ground_truth"),
+            seed_history=task.get("seed_history"),
         )
         return {
             "config_key": task["config_key"],
@@ -162,6 +161,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--concurrency", type=int, default=multiprocessing.cpu_count())
     parser.add_argument("--ground-truth", type=str, help="Comma-separated parameters")
+    parser.add_argument("--seed-history", type=str, help="Path to collection.anki2")
 
     args = parser.parse_args()
 
@@ -182,6 +182,7 @@ def main() -> None:
                     "seed": 42 + i,
                     "config_key": config_key,
                     "ground_truth": gt_params_input,
+                    "seed_history": args.seed_history,
                 }
             )
 
@@ -210,6 +211,9 @@ def main() -> None:
                 stabilities = res["stabilities"]
                 key = res["config_key"]
 
+                # Metrics for this repeat: averaged across all cards
+                rmse, kl = calculate_metrics(gt_params_res, fitted, stabilities)
+
                 # Calculate population curves for this run
                 s_nat_list = np.array([s[0] for s in stabilities])
                 s_alg_list = np.array([s[1] for s in stabilities])
@@ -221,12 +225,11 @@ def main() -> None:
                     t_eval, s_alg_list, fitted
                 )
 
-                # Metrics (averaged across cards)
-                rmse, kl = calculate_metrics(gt_params_res, fitted, stabilities)
-
                 aggregated_r_fit[key].append(r_fit_agg)
                 aggregated_r_nat[key].append(r_nat_agg)
                 aggregated_metrics[key].append((rmse, kl))
+            elif "error" in res:
+                tqdm.write(f"Task failed: {res['error']}")
 
     final_results = []
     for key in aggregated_r_fit:

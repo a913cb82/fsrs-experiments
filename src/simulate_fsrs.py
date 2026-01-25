@@ -1,6 +1,8 @@
 import argparse
 import math
+import os
 import random
+import sqlite3
 import sys
 from collections import defaultdict
 from copy import deepcopy
@@ -89,6 +91,51 @@ class RustOptimizer:
         fsrs_core = fsrs_rs_python.FSRS(fsrs_rs_python.DEFAULT_PARAMETERS)
         optimized_w = fsrs_core.compute_parameters(rust_items)
         return list(optimized_w)
+
+
+def load_anki_history(
+    path: str,
+) -> tuple[dict[int, list[ReviewLog]], datetime]:
+    """
+    Extracts FSRS-compatible review logs from an Anki collection.anki2 file.
+    """
+    if not os.path.exists(path):
+        tqdm.write(f"Error: Anki database not found at {path}")
+        return {}, START_DATE
+
+    conn = sqlite3.connect(path)
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            "SELECT cid, ease, id, type FROM revlog "
+            "WHERE ease BETWEEN 1 AND 4 ORDER BY id ASC"
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError as e:
+        tqdm.write(f"Error reading Anki database: {e}")
+        return {}, START_DATE
+    finally:
+        conn.close()
+
+    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
+    last_review_time = START_DATE
+
+    for cid, ease, rev_id, _rev_type in rows:
+        dt = datetime.fromtimestamp(rev_id / 1000.0, tz=timezone.utc)
+        log = ReviewLog(
+            card_id=cid,
+            rating=Rating(ease),
+            review_datetime=dt,
+            review_duration=None,
+        )
+        card_logs[cid].append(log)
+        if dt > last_review_time:
+            last_review_time = dt
+
+    total_revs = sum(len(logs) for logs in card_logs.values())
+    tqdm.write(f"Loaded {total_revs} reviews for {len(card_logs)} cards from Anki.")
+    return card_logs, last_review_time
 
 
 def simulate_day(
@@ -242,14 +289,16 @@ def run_simulation(
     seed: int = 42,
     tqdm_pos: int = 0,
     ground_truth: tuple[float, ...] | None = None,
+    seed_history: str | None = None,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
 
     if verbose and tqdm_pos == 0:
         burn_in_info = f", Burn-in: {burn_in_days} days" if burn_in_days > 0 else ""
+        seed_info = f", Seeded from: {seed_history}" if seed_history else ""
         tqdm.write(
-            f"Starting simulation: {n_days} days{burn_in_info}, "
+            f"Starting simulation: {n_days} days{burn_in_info}{seed_info}, "
             f"{review_limit} reviews/day, Retention: {retention}, Seed: {seed}"
         )
 
@@ -280,9 +329,9 @@ def run_simulation(
             parameters=ground_truth_params, desired_retention=initial_retention
         )
 
-        # Algo Scheduler: Initially Ground Truth, changes after burn-in
+        # Algo Scheduler: Initially Ground Truth (or defaults)
         algo_scheduler = Scheduler(
-            parameters=ground_truth_params, desired_retention=initial_retention
+            parameters=DEFAULT_PARAMETERS, desired_retention=initial_retention
         )
 
         # Two maps to track divergent states
@@ -293,7 +342,26 @@ def run_simulation(
 
         current_date = START_DATE
 
-        # PHASE 1: Burn-in (or full run if burn_in_days=0)
+        # Seeding Phase
+        if seed_history:
+            seeded_logs, last_rev = load_anki_history(seed_history)
+            current_date = last_rev + timedelta(days=1)
+
+            if seeded_logs:
+                if verbose:
+                    tqdm.write("Initializing card states from seeded history...")
+                for cid, logs in seeded_logs.items():
+                    # Reconstruct NATURE state using Ground Truth params
+                    true_cards[cid] = nature_scheduler.reschedule_card(
+                        Card(card_id=cid), logs
+                    )
+                    # Reconstruct ALGO state using default params
+                    sys_cards[cid] = algo_scheduler.reschedule_card(
+                        Card(card_id=cid), logs
+                    )
+                    card_logs[cid].extend(logs)
+
+        # PHASE 1: Burn-in
         limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
 
         pbar_p1 = (
@@ -402,16 +470,12 @@ def run_simulation(
             if verbose:
                 tqdm.write(f"Error during final optimization: {e}")
 
-        # Reconstruct final stabilities for all cards using the final fitted params
-        # This allows comparing the "true" nature curve vs "fitted" curve
-        # for every card.
+        # Reconstruct final stabilities for all cards
         stabilities: list[tuple[float, float]] = []
         if fitted_params:
             final_algo_scheduler = Scheduler(parameters=tuple(fitted_params))
             for cid in true_cards:
                 s_nat = true_cards[cid].stability or 0.0
-                # Use reschedule_card to get the stability this card WOULD have
-                # under the final optimized parameters.
                 rescheduled = final_algo_scheduler.reschedule_card(
                     Card(card_id=cid), card_logs[cid]
                 )
@@ -448,6 +512,7 @@ def run_simulation_cli() -> None:
     parser.add_argument(
         "--ground-truth", type=str, help="Comma-separated FSRS-6 parameters"
     )
+    parser.add_argument("--seed-history", type=str, help="Path to collection.anki2")
 
     args = parser.parse_args()
 
@@ -460,6 +525,7 @@ def run_simulation_cli() -> None:
         burn_in_days=args.burn_in,
         seed=args.seed,
         ground_truth=gt_params,
+        seed_history=args.seed_history,
     )
 
 
