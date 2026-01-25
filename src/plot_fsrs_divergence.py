@@ -2,6 +2,7 @@ import argparse
 import concurrent.futures
 import itertools
 import multiprocessing
+import sys
 from collections import defaultdict
 from typing import Any
 
@@ -10,7 +11,32 @@ import numpy as np
 from scipy.stats import entropy
 from tqdm import tqdm
 
-from .simulate_fsrs import parse_parameters, run_simulation
+try:
+    from simulate_fsrs import (
+        RustOptimizer,
+        load_anki_history,
+        parse_parameters,
+        run_simulation,
+    )
+except ImportError:
+    try:
+        from .simulate_fsrs import (
+            RustOptimizer,
+            load_anki_history,
+            parse_parameters,
+            run_simulation,
+        )
+    except ImportError:
+        # Fallback for direct execution when src is not in sys.path
+        import os
+
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        from simulate_fsrs import (
+            RustOptimizer,
+            load_anki_history,
+            parse_parameters,
+            run_simulation,
+        )
 
 
 def calculate_population_retrievability(
@@ -175,10 +201,8 @@ def main() -> None:
     # 1. Pre-fit initial parameters from seeded history if provided
     initial_params: tuple[float, ...] | None = None
     if args.seed_history:
-        from .simulate_fsrs import RustOptimizer, load_anki_history
-
         tqdm.write("Pre-fitting initial parameters from seeded history...")
-        logs, _ = load_anki_history(args.seed_history, args.deck_config)
+        logs, _ = load_anki_history(args.seed_history, args.deck_config, args.deck_name)
         flat_logs = [log for card_logs in logs.values() for log in card_logs]
         if len(flat_logs) >= 512:
             initial_params = tuple(
