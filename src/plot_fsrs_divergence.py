@@ -288,18 +288,10 @@ def main() -> None:
                 }
             )
 
-    t_eval = np.linspace(0, 100, 200)
-    _, gt_params, baseline_metrics = run_simulation(
-        n_days=1,
-        verbose=False,
-        ground_truth=gt_params_input,
-        initial_params=initial_params,
-        seeded_data=seeded_payload,
-    )
-    s_nat_base = np.array([s[0] for s in baseline_metrics.get("stabilities", [])])
-    gt_r_base = calculate_population_retrievability(t_eval, s_nat_base, gt_params_input)
+        t_eval = np.linspace(0, 100, 200)
 
-    # Map to store population results for averaging
+        # Map to store population results for averaging
+
     aggregated_r_fit = defaultdict(list)
     aggregated_r_nat = defaultdict(list)
     aggregated_metrics = defaultdict(list)
@@ -346,15 +338,7 @@ def main() -> None:
             elif "error" in res:
                 tqdm.write(f"Task failed: {res['error']}")
 
-    final_results = [
-        {
-            "label": "Ground Truth",
-            "r_fit_avg": gt_r_base,
-            "r_nat_avg": gt_r_base,
-            "rmse": 0.0,
-            "kl": 0.0,
-        }
-    ]
+    final_results = []
     for key in aggregated_r_fit:
         burn_in, days, reviews, retention = key
 
