@@ -2,14 +2,14 @@ import argparse
 import math
 import random
 import sys
-import traceback
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from tqdm import tqdm
+
 # Ensure we can import fsrs if it's not in path for some reason,
-# though we installed it.
 try:
     from fsrs import Card, Optimizer, Rating, ReviewLog, Scheduler
     from fsrs.scheduler import DEFAULT_PARAMETERS
@@ -149,7 +149,7 @@ def parse_retention_schedule(
             segments.append((int(d), float(r)))
         return segments
     except ValueError:
-        print(
+        tqdm.write(
             f"Invalid retention format: {schedule_str}. "
             "Expected float (e.g. '0.9') or schedule (e.g. '5:0.7,1:0.9')"
         )
@@ -177,13 +177,14 @@ def run_simulation(
     retention: str = "0.9",
     verbose: bool = True,
     seed: int = 42,
+    tqdm_pos: int = 0,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
 
-    if verbose:
+    if verbose and tqdm_pos == 0:
         burn_in_info = f", Burn-in: {burn_in_days} days" if burn_in_days > 0 else ""
-        print(
+        tqdm.write(
             f"Starting simulation: {n_days} days{burn_in_info}, "
             f"{review_limit} reviews/day, Retention: {retention}, Seed: {seed}"
         )
@@ -197,91 +198,57 @@ def run_simulation(
     except ImportError:
         pass
 
-    ground_truth_params = DEFAULT_PARAMETERS
+    # Monkeypatch Optimizer's tqdm to respect position
+    import fsrs.optimizer
 
-    # Nature Scheduler: Always Ground Truth
-    nature_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=initial_retention
-    )
+    original_optimizer_tqdm = fsrs.optimizer.tqdm
 
-    # Algo Scheduler: Initially Ground Truth, changes after burn-in
-    algo_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=initial_retention
-    )
+    def patched_tqdm(*args: Any, **kwargs: Any) -> Any:
+        if "position" not in kwargs:
+            kwargs["position"] = tqdm_pos + 1
+        if "leave" not in kwargs:
+            kwargs["leave"] = False
+        return original_optimizer_tqdm(*args, **kwargs)
 
-    # Two maps to track divergent states
-    true_cards: dict[int, Card] = {}  # ID -> Card (Nature State)
-    sys_cards: dict[int, Card] = {}  # ID -> Card (Algo State)
+    fsrs.optimizer.tqdm = patched_tqdm
 
-    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
+    try:
+        ground_truth_params = DEFAULT_PARAMETERS
 
-    current_date = START_DATE
-
-    # PHASE 1: Burn-in (or full run if burn_in_days=0)
-    limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
-
-    for day in range(limit_phase_1):
-        if verbose and day % 30 == 0:
-            print(f"Simulating day {day}/{n_days}...")
-
-        daily_retention = get_retention_for_day(day, parsed_schedule)
-        algo_scheduler.desired_retention = daily_retention
-
-        simulate_day(
-            nature_scheduler,
-            algo_scheduler,
-            true_cards,
-            sys_cards,
-            card_logs,
-            current_date,
-            review_limit,
+        # Nature Scheduler: Always Ground Truth
+        nature_scheduler = Scheduler(
+            parameters=ground_truth_params, desired_retention=initial_retention
         )
-        current_date += timedelta(days=1)
 
-    # PHASE 2: After burn-in
-    if burn_in_days > 0 and burn_in_days < n_days:
-        if verbose:
-            print(f"Burn-in complete ({burn_in_days} days). Fitting parameters...")
+        # Algo Scheduler: Initially Ground Truth, changes after burn-in
+        algo_scheduler = Scheduler(
+            parameters=ground_truth_params, desired_retention=initial_retention
+        )
 
-        # Flatten logs for optimizer
-        all_logs = [log for logs in card_logs.values() for log in logs]
+        # Two maps to track divergent states
+        true_cards: dict[int, Card] = {}  # ID -> Card (Nature State)
+        sys_cards: dict[int, Card] = {}  # ID -> Card (Algo State)
 
-        if len(all_logs) >= 512:
-            try:
-                optimizer = Optimizer(all_logs)
-                fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
-                if verbose:
-                    print("Burn-in Fit Complete. Updating Scheduler.")
-                    print(f"Intermediate Params: {fitted_params}")
+        card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
 
-                # Update Algo Scheduler with fitted params
-                algo_scheduler = Scheduler(
-                    parameters=fitted_params,
-                    desired_retention=algo_scheduler.desired_retention,
-                )
+        current_date = START_DATE
 
-                # Reschedule existing cards
-                if verbose:
-                    print("Rescheduling existing cards with new parameters...")
+        # PHASE 1: Burn-in (or full run if burn_in_days=0)
+        limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
 
-                for cid in sys_cards:
-                    sys_cards[cid] = algo_scheduler.reschedule_card(
-                        sys_cards[cid], card_logs[cid]
-                    )
+        pbar_p1 = (
+            tqdm(
+                range(limit_phase_1),
+                desc="Simulating (P1)",
+                position=tqdm_pos,
+                leave=False,
+                disable=not verbose,
+            )
+            if verbose
+            else range(limit_phase_1)
+        )
 
-            except Exception as e:
-                print(f"Burn-in optimization failed: {e}")
-                if verbose:
-                    traceback.print_exc()
-        else:
-            if verbose:
-                print("Not enough logs for burn-in fit. Continuing with Ground Truth.")
-
-        # Resume simulation
-        for day in range(burn_in_days, n_days):
-            if verbose and day % 30 == 0:
-                print(f"Simulating day {day}/{n_days}...")
-
+        for day in pbar_p1:
             daily_retention = get_retention_for_day(day, parsed_schedule)
             algo_scheduler.desired_retention = daily_retention
 
@@ -296,72 +263,100 @@ def run_simulation(
             )
             current_date += timedelta(days=1)
 
-    # End of simulation
-    all_logs = [log for logs in card_logs.values() for log in logs]
+        # PHASE 2: After burn-in
+        if burn_in_days > 0 and burn_in_days < n_days:
+            # Flatten logs for optimizer
+            all_logs = [log for logs in card_logs.values() for log in logs]
 
-    if verbose:
-        print(f"Simulation complete. {len(all_logs)} reviews generated.")
+            if len(all_logs) >= 512:
+                try:
+                    optimizer = Optimizer(all_logs)
+                    fitted_params = optimizer.compute_optimal_parameters(
+                        verbose=verbose
+                    )
 
-    # Calculate memorized over time using TRUE cards (Nature)
-    total_retrievability = 0.0
-    end_date = current_date
-    log_prob_sum = 0.0
+                    # Update Algo Scheduler with fitted params
+                    algo_scheduler = Scheduler(
+                        parameters=fitted_params,
+                        desired_retention=algo_scheduler.desired_retention,
+                    )
 
-    for card in true_cards.values():
-        r = nature_scheduler.get_card_retrievability(card, end_date)
-        total_retrievability += r
-        if r > 0:
-            log_prob_sum += math.log(r)
-        else:
-            log_prob_sum = -float("inf")
+                    # Reschedule existing cards
+                    for cid in sys_cards:
+                        sys_cards[cid] = algo_scheduler.reschedule_card(
+                            sys_cards[cid], card_logs[cid]
+                        )
 
-    if verbose:
-        print(f"Total cards: {len(true_cards)}")
-        print(f"Total Retention (Sum of R): {total_retrievability:.4f}")
-        print(f"Joint Retention Probability (Product of R): exp({log_prob_sum:.4f})")
+                except Exception as e:
+                    if verbose:
+                        tqdm.write(f"Burn-in optimization failed: {e}")
 
-    # Fit FSRS parameters
-    if verbose:
-        print("Fitting final parameters...")
+            # Resume simulation
+            pbar_p2 = (
+                tqdm(
+                    range(burn_in_days, n_days),
+                    desc="Simulating (P2)",
+                    position=tqdm_pos,
+                    leave=False,
+                    disable=not verbose,
+                )
+                if verbose
+                else range(burn_in_days, n_days)
+            )
+            for day in pbar_p2:
+                daily_retention = get_retention_for_day(day, parsed_schedule)
+                algo_scheduler.desired_retention = daily_retention
 
-    fitted_params = None
-    try:
-        if len(all_logs) < 512:
+                simulate_day(
+                    nature_scheduler,
+                    algo_scheduler,
+                    true_cards,
+                    sys_cards,
+                    card_logs,
+                    current_date,
+                    review_limit,
+                )
+                current_date += timedelta(days=1)
+
+        # End of simulation
+        all_logs = [log for logs in card_logs.values() for log in logs]
+
+        # Calculate memorized over time using TRUE cards (Nature)
+        total_retrievability = 0.0
+        end_date = current_date
+        log_prob_sum = 0.0
+
+        for card in true_cards.values():
+            r = nature_scheduler.get_card_retrievability(card, end_date)
+            total_retrievability += r
+            if r > 0:
+                log_prob_sum += math.log(r)
+            else:
+                log_prob_sum = -float("inf")
+
+        # Fit FSRS parameters
+        fitted_params = None
+        try:
+            optimizer = Optimizer(all_logs)
+            fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
+
+        except Exception as e:
             if verbose:
-                print("Warning: Not enough review logs.")
+                tqdm.write(f"Error during final optimization: {e}")
 
-        optimizer = Optimizer(all_logs)
-        fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
-
-        if verbose:
-            print("\nFinal Fitted Parameters:")
-            print(fitted_params)
-
-            print("\nGround Truth Parameters:")
-            print(list(ground_truth_params))
-
-            # Compare
-            mse = sum(
-                (f - g) ** 2
-                for f, g in zip(fitted_params, ground_truth_params, strict=False)
-            ) / len(fitted_params)
-            print(f"MSE between fitted and ground truth: {mse:.8f}")
-
-    except Exception as e:
-        print(f"Error during optimization: {e}")
-        if verbose:
-            traceback.print_exc()
-
-    return (
-        fitted_params,
-        ground_truth_params,
-        {
-            "total_retention": total_retrievability,
-            "log_prob_sum": log_prob_sum,
-            "review_count": len(all_logs),
-            "card_count": len(true_cards),
-        },
-    )
+        return (
+            fitted_params,
+            ground_truth_params,
+            {
+                "total_retention": total_retrievability,
+                "log_prob_sum": log_prob_sum,
+                "review_count": len(all_logs),
+                "card_count": len(true_cards),
+            },
+        )
+    finally:
+        # Restore original tqdm
+        fsrs.optimizer.tqdm = original_optimizer_tqdm
 
 
 def run_simulation_cli() -> None:

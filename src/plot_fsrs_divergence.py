@@ -1,9 +1,10 @@
 import argparse
-import traceback
+import itertools
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from tqdm import tqdm
 
 from simulate_fsrs import run_simulation
 
@@ -70,7 +71,11 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
         # Add shaded region for standard deviation
         if r_std is not None and np.any(r_std > 0):
             plt.fill_between(
-                t, r_values - r_std, r_values + r_std, color=line.get_color(), alpha=0.2
+                t,
+                r_values - r_std,
+                r_values + r_std,
+                color=line.get_color(),
+                alpha=0.2,
             )
 
     plt.xlabel("Days since review")
@@ -79,7 +84,7 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     plt.legend()
     plt.grid(True)
     plt.savefig("forgetting_curve_divergence.png")
-    print("Plot saved to forgetting_curve_divergence.png")
+    tqdm.write("Plot saved to forgetting_curve_divergence.png")
 
 
 def main() -> None:
@@ -115,79 +120,79 @@ def main() -> None:
     results.append({"label": "Ground Truth", "r_values": gt_r})
 
     # Iterate over all combinations
-    for burn_in in args.burn_ins:
-        for days in args.days:
-            for reviews in args.reviews:
-                for retention in args.retentions:
-                    print(
-                        f"Running config: Days={days}, Reviews={reviews}, "
-                        f"Retention={retention}, Burn-in={burn_in}, "
-                        f"Repeats={args.repeats}"
-                    )
+    configs = list(
+        itertools.product(args.burn_ins, args.days, args.reviews, args.retentions)
+    )
 
-                    all_fit_r = []
-                    all_rmse = []
-                    all_kl = []
+    pbar_configs = tqdm(configs, desc="Configs", position=0)
+    for burn_in, days, reviews, retention in pbar_configs:
+        pbar_configs.set_postfix(days=days, ret=retention, bi=burn_in)
 
-                    for i in range(args.repeats):
-                        try:
-                            # Use different seed for each repeat
-                            fitted, gt, _metrics = run_simulation(
-                                n_days=days,
-                                review_limit=reviews,
-                                retention=retention,
-                                burn_in_days=burn_in,
-                                verbose=False,
-                                seed=42 + i,
-                            )
+        all_fit_r = []
+        all_rmse = []
+        all_kl = []
 
-                            if fitted is None:
-                                print(f"Repeat {i} optimization failed. Skipping.")
-                                continue
+        pbar_repeats = tqdm(
+            range(args.repeats), desc="Repeats", position=1, leave=False
+        )
+        for i in pbar_repeats:
+            try:
+                # Use different seed for each repeat
+                # Pass tqdm_pos to manage nested bars inside run_simulation
+                fitted, gt, _metrics = run_simulation(
+                    n_days=days,
+                    review_limit=reviews,
+                    retention=retention,
+                    burn_in_days=burn_in,
+                    verbose=True,
+                    seed=42 + i,
+                    tqdm_pos=2,
+                )
 
-                            fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
-                            rmse, kl = calculate_metrics(gt_r, fit_r)
+                if fitted is None:
+                    continue
 
-                            all_fit_r.append(fit_r)
-                            all_rmse.append(rmse)
-                            all_kl.append(kl)
+                fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
+                rmse, kl = calculate_metrics(gt_r, fit_r)
 
-                        except Exception as e:
-                            print(f"Repeat {i} failed for config: {e}")
-                            traceback.print_exc()
+                all_fit_r.append(fit_r)
+                all_rmse.append(rmse)
+                all_kl.append(kl)
 
-                    if not all_fit_r:
-                        print("All repeats failed for this config. Skipping.")
-                        continue
+            except Exception as e:
+                tqdm.write(f"Repeat {i} failed for config: {e}")
+                # traceback.print_exc()
 
-                    # Average the curves
-                    avg_fit_r = np.mean(all_fit_r, axis=0)
-                    std_fit_r = np.std(all_fit_r, axis=0)
-                    # Average the metrics
-                    avg_rmse = float(np.mean(all_rmse))
-                    avg_kl = float(np.mean(all_kl))
+        if not all_fit_r:
+            tqdm.write("All repeats failed for this config. Skipping.")
+            continue
 
-                    label = (
-                        f"Fit (D={days}, R={reviews}, Ret={retention}, BI={burn_in})"
-                    )
-                    results.append(
-                        {
-                            "label": label,
-                            "r_values": avg_fit_r,
-                            "r_std": std_fit_r,
-                            "rmse": avg_rmse,
-                            "kl": avg_kl,
-                        }
-                    )
-                    print(
-                        f"Completed config. avg RMSE: {avg_rmse:.6f}, "
-                        f"avg KL: {avg_kl:.6f}"
-                    )
+        # Average the curves
+        avg_fit_r = np.mean(all_fit_r, axis=0)
+        std_fit_r = np.std(all_fit_r, axis=0)
+        # Average the metrics
+        avg_rmse = float(np.mean(all_rmse))
+        avg_kl = float(np.mean(all_kl))
 
-    if len(results) > 1:
+        label = f"Fit (D={days}, R={reviews}, Ret={retention}, BI={burn_in})"
+        results.append(
+            {
+                "label": label,
+                "r_values": avg_fit_r,
+                "r_std": std_fit_r,
+                "rmse": avg_rmse,
+                "kl": avg_kl,
+            }
+        )
+        tqdm.write(
+            f"Config {days}d, {retention}ret, {burn_in}bi done. "
+            f"avg RMSE: {avg_rmse:.6f}, avg KL: {avg_kl:.6f}"
+        )
+
+    if len(results) > 1:  # More than just Ground Truth
         plot_forgetting_curves(results)
     else:
-        print("No results to plot.")
+        tqdm.write("No results to plot.")
 
 
 if __name__ == "__main__":
