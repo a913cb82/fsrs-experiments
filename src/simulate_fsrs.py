@@ -194,6 +194,8 @@ def run_simulation(
     try:
         import torch
 
+        # Avoid oversubscribing when running in parallel
+        torch.set_num_threads(1)
         torch.manual_seed(seed)
     except ImportError:
         pass

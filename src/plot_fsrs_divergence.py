@@ -1,9 +1,13 @@
 import argparse
+import concurrent.futures
 import itertools
+import multiprocessing
+from collections import defaultdict
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.stats import entropy
 from tqdm import tqdm
 
 from simulate_fsrs import run_simulation
@@ -14,14 +18,8 @@ def calculate_retrievability(
     stability: float,
     parameters: list[float] | tuple[float, ...],
 ) -> np.ndarray[Any, Any]:
-    # Ensure parameters is a list/tuple of floats, not tensors
-    # run_simulation returns list of floats
-
     decay = -parameters[20]
-    # Bounds for decay param (index 20) are [0.1, 0.8] in FSRS, so non-zero.
     factor = 0.9 ** (1 / decay) - 1
-
-    # Formula: R = (1 + factor * t / S) ^ decay
     res: np.ndarray[Any, Any] = (1 + factor * t / stability) ** decay
     return res
 
@@ -31,29 +29,23 @@ def calculate_metrics(
 ) -> tuple[float, float]:
     """
     Calculate RMSE and Mean KL Divergence between ground truth and fitted curves.
-    KL divergence is calculated between Bernoulli distributions at each time point.
     """
     # RMSE
     rmse = float(np.sqrt(np.mean((gt_r - fitted_r) ** 2)))
 
     # KL Divergence between Bernoulli distributions at each t
-    # p = ground truth, q = fitted
     p = np.clip(gt_r, 1e-10, 1 - 1e-10)
     q = np.clip(fitted_r, 1e-10, 1 - 1e-10)
 
-    kl = p * np.log(p / q) + (1 - p) * np.log((1 - p) / (1 - q))
+    # KL(P || Q) for Bernoulli is sum of KL for each outcome
+    kl = entropy(p, q) + entropy(1 - p, 1 - q)
     mean_kl = float(np.mean(kl))
 
     return rmse, mean_kl
 
 
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
-    """
-    results: list of dicts with keys 'label', 'r_values', 'r_std', 'rmse', 'kl'
-    """
     plt.figure(figsize=(12, 8))
-
-    # Time range (days)
     t = np.linspace(0, 100, 200)
 
     for res in results:
@@ -68,7 +60,6 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
 
         (line,) = plt.plot(t, r_values, label=label)
 
-        # Add shaded region for standard deviation
         if r_std is not None and np.any(r_std > 0):
             plt.fill_between(
                 t,
@@ -87,95 +78,106 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
     tqdm.write("Plot saved to forgetting_curve_divergence.png")
 
 
+def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
+    """Worker function for multiprocessing."""
+    try:
+        fitted, gt, _metrics = run_simulation(
+            n_days=task["days"],
+            review_limit=task["reviews"],
+            retention=task["retention"],
+            burn_in_days=task["burn_in"],
+            verbose=False,  # Disable inner logs in parallel
+            seed=task["seed"],
+        )
+        return {
+            "config_key": task["config_key"],
+            "fitted": fitted,
+            "gt": gt,
+            "success": fitted is not None,
+        }
+    except Exception as e:
+        return {"config_key": task["config_key"], "success": False, "error": str(e)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run simulations and plot divergence")
-    parser.add_argument(
-        "--days", type=int, nargs="+", default=[365], help="List of day limits"
-    )
-    parser.add_argument(
-        "--reviews", type=int, nargs="+", default=[200], help="List of review limits"
-    )
-    parser.add_argument(
-        "--retentions",
-        type=str,
-        nargs="+",
-        default=["0.9"],
-        help="List of target retentions (floats or schedules)",
-    )
-    parser.add_argument(
-        "--burn-ins", type=int, nargs="+", default=[0], help="List of burn-in periods"
-    )
-    parser.add_argument(
-        "--repeats", type=int, default=1, help="Number of repeats per config"
-    )
+    parser.add_argument("--days", type=int, nargs="+", default=[365])
+    parser.add_argument("--reviews", type=int, nargs="+", default=[200])
+    parser.add_argument("--retentions", type=str, nargs="+", default=["0.9"])
+    parser.add_argument("--burn-ins", type=int, nargs="+", default=[0])
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--concurrency", type=int, default=multiprocessing.cpu_count())
 
     args = parser.parse_args()
 
-    results = []
-    t_eval = np.linspace(0, 100, 200)
+    # Flatten configurations into individual tasks
+    tasks = []
+    for burn_in, days, reviews, retention in itertools.product(
+        args.burn_ins, args.days, args.reviews, args.retentions
+    ):
+        config_key = (burn_in, days, reviews, retention)
+        for i in range(args.repeats):
+            tasks.append(
+                {
+                    "burn_in": burn_in,
+                    "days": days,
+                    "reviews": reviews,
+                    "retention": retention,
+                    "seed": 42 + i,
+                    "config_key": config_key,
+                }
+            )
 
-    # Capture Ground Truth once
+    t_eval = np.linspace(0, 100, 200)
     _, gt_params, _ = run_simulation(n_days=1, verbose=False)
     gt_r = calculate_retrievability(t_eval, gt_params[2], gt_params)
-    results.append({"label": "Ground Truth", "r_values": gt_r})
 
-    # Iterate over all combinations
-    configs = list(
-        itertools.product(args.burn_ins, args.days, args.reviews, args.retentions)
+    # Map to store list of fit_r for each config
+    aggregated_results: dict[tuple[Any, ...], list[np.ndarray[Any, Any]]] = defaultdict(
+        list
+    )
+    aggregated_metrics: dict[tuple[Any, ...], list[tuple[float, float]]] = defaultdict(
+        list
     )
 
-    pbar_configs = tqdm(configs, desc="Configs", position=0)
-    for burn_in, days, reviews, retention in pbar_configs:
-        pbar_configs.set_postfix(days=days, ret=retention, bi=burn_in)
+    tqdm.write(f"Starting {len(tasks)} simulations using {args.concurrency} workers...")
 
-        all_fit_r = []
-        all_rmse = []
-        all_kl = []
+    with concurrent.futures.ProcessPoolExecutor(
+        max_workers=args.concurrency
+    ) as executor:
+        futures = {executor.submit(run_single_task, task): task for task in tasks}
 
-        pbar_repeats = tqdm(
-            range(args.repeats), desc="Repeats", position=1, leave=False
-        )
-        for i in pbar_repeats:
-            try:
-                # Use different seed for each repeat
-                # Pass tqdm_pos to manage nested bars inside run_simulation
-                fitted, gt, _metrics = run_simulation(
-                    n_days=days,
-                    review_limit=reviews,
-                    retention=retention,
-                    burn_in_days=burn_in,
-                    verbose=True,
-                    seed=42 + i,
-                    tqdm_pos=2,
-                )
-
-                if fitted is None:
-                    continue
-
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=len(tasks),
+            desc="Simulating",
+        ):
+            res = future.result()
+            if res["success"]:
+                fitted = res["fitted"]
                 fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
                 rmse, kl = calculate_metrics(gt_r, fit_r)
 
-                all_fit_r.append(fit_r)
-                all_rmse.append(rmse)
-                all_kl.append(kl)
+                key = res["config_key"]
+                aggregated_results[key].append(fit_r)
+                aggregated_metrics[key].append((rmse, kl))
+            elif "error" in res:
+                tqdm.write(f"Task failed: {res['error']}")
 
-            except Exception as e:
-                tqdm.write(f"Repeat {i} failed for config: {e}")
-                # traceback.print_exc()
+    # Process and average results
+    final_results = [{"label": "Ground Truth", "r_values": gt_r}]
 
-        if not all_fit_r:
-            tqdm.write("All repeats failed for this config. Skipping.")
-            continue
+    for key, fit_rs in aggregated_results.items():
+        burn_in, days, reviews, retention = key
+        metrics = aggregated_metrics[key]
 
-        # Average the curves
-        avg_fit_r = np.mean(all_fit_r, axis=0)
-        std_fit_r = np.std(all_fit_r, axis=0)
-        # Average the metrics
-        avg_rmse = float(np.mean(all_rmse))
-        avg_kl = float(np.mean(all_kl))
+        avg_fit_r = np.mean(fit_rs, axis=0)
+        std_fit_r = np.std(fit_rs, axis=0)
+        avg_rmse = float(np.mean([m[0] for m in metrics]))
+        avg_kl = float(np.mean([m[1] for m in metrics]))
 
         label = f"Fit (D={days}, R={reviews}, Ret={retention}, BI={burn_in})"
-        results.append(
+        final_results.append(
             {
                 "label": label,
                 "r_values": avg_fit_r,
@@ -184,13 +186,9 @@ def main() -> None:
                 "kl": avg_kl,
             }
         )
-        tqdm.write(
-            f"Config {days}d, {retention}ret, {burn_in}bi done. "
-            f"avg RMSE: {avg_rmse:.6f}, avg KL: {avg_kl:.6f}"
-        )
 
-    if len(results) > 1:  # More than just Ground Truth
-        plot_forgetting_curves(results)
+    if len(final_results) > 1:
+        plot_forgetting_curves(final_results)
     else:
         tqdm.write("No results to plot.")
 
