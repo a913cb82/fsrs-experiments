@@ -64,7 +64,7 @@ class RustOptimizer:
             raise ImportError("fsrs-rs-python not installed.")
 
         # Convert ReviewLog objects to Rust-compatible FSRSItem objects.
-        items_map = defaultdict(list)
+        items_map: dict[int, list[ReviewLog]] = defaultdict(list)
         for log in self.review_logs:
             items_map[log.card_id].append(log)
 
@@ -96,13 +96,43 @@ class RustOptimizer:
                 item_history = all_reviews[:i]
                 rust_items.append(fsrs_rs_python.FSRSItem(item_history))
 
-        if not rust_items:
+        # Filter items: Rust optimizer requires at least one review with delta_t > 0
+        filtered_items = [
+            item for item in rust_items if item.long_term_review_cnt() > 0
+        ]
+
+        if not filtered_items:
             return list(fsrs_rs_python.DEFAULT_PARAMETERS)
 
         # Run the Rust optimizer
         fsrs_core = fsrs_rs_python.FSRS(fsrs_rs_python.DEFAULT_PARAMETERS)
-        optimized_w = fsrs_core.compute_parameters(rust_items)
+        optimized_w = fsrs_core.compute_parameters(filtered_items)
         return list(optimized_w)
+
+
+def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
+    """Decodes a Protobuf varint from bytes."""
+    res = 0
+    shift = 0
+    while True:
+        b = data[pos]
+        res |= (b & 0x7F) << shift
+        pos += 1
+        if not (b & 0x80):
+            break
+        shift += 7
+    return res, pos
+
+
+def get_deck_config_id(blob: bytes) -> int | None:
+    """Extracts config_id (field 1) from Anki's DeckCommon BLOB."""
+    if not blob or len(blob) == 0 or blob[0] != 0x08:
+        return None
+    try:
+        cid, _ = decode_varint(blob, 1)
+        return cid
+    except Exception:
+        return None
 
 
 def load_anki_history(
@@ -123,62 +153,100 @@ def load_anki_history(
     try:
         # Check database version/schema
         cur.execute("SELECT ver FROM col")
-        ver_row = cur.fetchone()
-        ver = ver_row[0] if ver_row else 0
+        v_row = cur.fetchone()
+        ver = int(v_row[0]) if v_row and v_row[0] is not None else 0
 
-        valid_deck_ids = []
+        valid_deck_ids: list[int] = []
 
         if ver >= 18:
-            # New relational schema
-            cur.execute("SELECT id, name FROM decks")
-            all_decks = cur.fetchall()
+            # New relational schema (Anki 23.10+)
+            cur.execute("SELECT id, name, common FROM decks")
+            decks = cur.fetchall()
 
-            if deck_name:
-                valid_deck_ids = [d[0] for d in all_decks if d[1] == deck_name]
-                if not valid_deck_ids:
-                    avail_decks = ", ".join(d[1] for d in all_decks)
-                    tqdm.write(f"Warning: Deck '{deck_name}' not found.")
-                    tqdm.write(f"Available decks: {avail_decks}")
-            elif deck_config_name:
-                # Filtering by config name is hard in ver 18 without protobuf
-                tqdm.write(
-                    "Warning: Filtering by config name is not supported in "
-                    "this Anki version without protobuf parsing."
-                )
-                tqdm.write("Loading all reviews instead. Try filtering by --deck-name.")
-                valid_deck_ids = [d[0] for d in all_decks]
-            else:
-                valid_deck_ids = [d[0] for d in all_decks]
+            cur.execute("SELECT id, name FROM deck_config")
+            configs = {str(row[1]): int(row[0]) for row in cur.fetchall()}
+
+            if deck_config_name and deck_config_name not in configs:
+                avail = ", ".join(configs.keys())
+                tqdm.write(f"Warning: Config '{deck_config_name}' not found.")
+                tqdm.write(f"Available configs: {avail}")
+                return {}, START_DATE
+
+            t_cid = configs.get(str(deck_config_name)) if deck_config_name else None
+
+            # Map deck names to their resolved config IDs (handling inheritance)
+            d_name_map: dict[str, tuple[Any, ...]] = {str(row[1]): row for row in decks}
+
+            res_d_configs: dict[int, int] = {}
+            for row in decks:
+                did_v, name_v, blob_v = row[0], row[1], row[2]
+                if did_v is None or name_v is None or blob_v is None:
+                    continue
+                d_id, d_name, d_blob = int(did_v), str(name_v), bytes(blob_v)
+                c_id = get_deck_config_id(d_blob)
+                if c_id is None:
+                    parts = d_name.split("::")
+                    for i in range(len(parts) - 1, 0, -1):
+                        p_name = "::".join(parts[:i])
+                        if p_name in d_name_map:
+                            p_row = d_name_map[p_name]
+                            p_blob_raw = p_row[2]
+                            if p_blob_raw is not None:
+                                p_blob = bytes(p_blob_raw)
+                                c_id = get_deck_config_id(p_blob)
+                                if c_id is not None:
+                                    break
+                if c_id is None:
+                    c_id = 1
+                res_d_configs[d_id] = c_id
+
+            # Filter decks
+            for row in decks:
+                did_v, name_v = row[0], row[1]
+                if did_v is None or name_v is None:
+                    continue
+                d_id, d_name = int(did_v), str(name_v)
+                if deck_name and d_name != deck_name:
+                    continue
+                if t_cid is not None:
+                    if d_id not in res_d_configs or res_d_configs[d_id] != t_cid:
+                        continue
+                valid_deck_ids.append(d_id)
+
+            if deck_name and not valid_deck_ids:
+                avail_decks = ", ".join(str(d[1]) for d in decks)
+                tqdm.write(f"Warning: Deck '{deck_name}' not found.")
+                tqdm.write(f"Available decks: {avail_decks}")
         else:
-            # Old JSON schema
+            # Old JSON schema (pre-23.10)
             cur.execute("SELECT decks, dconf FROM col")
             col_row = cur.fetchone()
             if not col_row:
                 return {}, START_DATE
 
-            decks_json = json.loads(col_row[0])
-            dconf_json = json.loads(col_row[1])
+            decks_json = json.loads(col_row[0]) if col_row[0] else {}
+            dconf_json = json.loads(col_row[1]) if col_row[1] else {}
 
             target_conf_id = None
             if deck_config_name:
-                for cid, cfg in dconf_json.items():
+                for cid_s, cfg in dconf_json.items():
                     if cfg.get("name") == deck_config_name:
-                        target_conf_id = int(cid)
+                        target_conf_id = int(cid_s)
                         break
                 if target_conf_id is None:
-                    avail_cfg_names = [
-                        c.get("name") for c in dconf_json.values() if c.get("name")
+                    avail_cfg = [
+                        str(c.get("name")) for c in dconf_json.values() if c.get("name")
                     ]
                     tqdm.write(
                         f"Warning: Config '{deck_config_name}' not found. "
-                        f"Available: {', '.join(avail_cfg_names)}"
+                        f"Available: {', '.join(avail_cfg)}"
                     )
 
-            for did, deck in decks_json.items():
+            for did_s, deck in decks_json.items():
                 if deck_name and deck.get("name") != deck_name:
                     continue
                 if target_conf_id is None or deck.get("conf") == target_conf_id:
-                    valid_deck_ids.append(int(did))
+                    valid_deck_ids.append(int(did_s))
 
         if not valid_deck_ids:
             return {}, START_DATE
