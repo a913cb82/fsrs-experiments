@@ -151,3 +151,21 @@ def test_load_anki_history_malformed_json(tmp_path: Any) -> None:
 
     logs, _ = load_anki_history(db_path)
     assert logs == {}
+
+
+def test_weight_inference_from_test_db() -> None:
+    from src.simulate_fsrs import infer_review_weights
+
+    logs, _ = load_anki_history(TEST_DB)
+    weights = infer_review_weights(logs)
+
+    # Based on scripts/create_test_db.py:
+    # Card 1: [3, 3] -> First: 3, Success: 3
+    # Card 2: [3, 1, 3] -> First: 3, Success: 3 (1 is Again/Failure)
+    # Total First: [0, 0, 2, 0] -> Good=1.0
+    # Total Success: [0, 2, 0] -> Good=1.0
+
+    assert weights["first"][2] == 1.0
+    assert weights["success"][1] == 1.0
+    assert weights["first"][0] == 0.0
+    assert weights["success"][0] == 0.0

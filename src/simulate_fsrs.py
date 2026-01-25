@@ -30,16 +30,16 @@ except ImportError:
 # Constants for simulation
 START_DATE = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
-# Probabilities given recall (Success)
-PROB_HARD = 0.15
-PROB_GOOD = 0.75
-PROB_EASY = 0.10
+# Probabilities given recall (Success) - Defaults
+DEFAULT_PROB_HARD = 0.15
+DEFAULT_PROB_GOOD = 0.75
+DEFAULT_PROB_EASY = 0.10
 
-# Weights for new cards (first review ratings)
-PROB_FIRST_AGAIN = 0.2
-PROB_FIRST_HARD = 0.2
-PROB_FIRST_GOOD = 0.5
-PROB_FIRST_EASY = 0.1
+# Weights for new cards (first review ratings) - Defaults
+DEFAULT_PROB_FIRST_AGAIN = 0.2
+DEFAULT_PROB_FIRST_HARD = 0.2
+DEFAULT_PROB_FIRST_GOOD = 0.5
+DEFAULT_PROB_FIRST_EASY = 0.1
 
 __all__ = [
     "run_simulation",
@@ -52,7 +52,61 @@ __all__ = [
     "Card",
     "Scheduler",
     "DEFAULT_PARAMETERS",
+    "infer_review_weights",
 ]
+
+
+def infer_review_weights(
+    card_logs: dict[int, list[ReviewLog]],
+) -> dict[str, list[float]]:
+    """
+    Infers rating probabilities from real review history.
+    Returns weights for first reviews and weights for subsequent successful reviews.
+    """
+    first_ratings = [0, 0, 0, 0]  # Again, Hard, Good, Easy
+    success_ratings = [0, 0, 0]  # Hard, Good, Easy
+
+    for logs in card_logs.values():
+        if not logs:
+            continue
+        # Sort logs by time
+        sorted_logs = sorted(logs, key=lambda x: x.review_datetime)
+
+        # First review
+        first_r = int(sorted_logs[0].rating)
+        if 1 <= first_r <= 4:
+            first_ratings[first_r - 1] += 1
+
+        # Subsequent reviews
+        for log in sorted_logs[1:]:
+            r = int(log.rating)
+            if 2 <= r <= 4:  # Success branch (recalled)
+                success_ratings[r - 2] += 1
+
+    # Normalize First Ratings
+    total_first = sum(first_ratings)
+    if total_first > 0:
+        first_weights = [r / total_first for r in first_ratings]
+    else:
+        first_weights = [
+            DEFAULT_PROB_FIRST_AGAIN,
+            DEFAULT_PROB_FIRST_HARD,
+            DEFAULT_PROB_FIRST_GOOD,
+            DEFAULT_PROB_FIRST_EASY,
+        ]
+
+    # Normalize Success Ratings
+    total_success = sum(success_ratings)
+    if total_success > 0:
+        success_weights = [r / total_success for r in success_ratings]
+    else:
+        success_weights = [
+            DEFAULT_PROB_HARD,
+            DEFAULT_PROB_GOOD,
+            DEFAULT_PROB_EASY,
+        ]
+
+    return {"first": first_weights, "success": success_weights}
 
 
 class RustOptimizer:
@@ -309,6 +363,7 @@ def simulate_day(
     card_logs: dict[int, list[ReviewLog]],
     current_date: datetime,
     review_limit: int,
+    weights: dict[str, list[float]] | None = None,
 ) -> None:
     # Use NumPy for fast due-check across the deck
     # This replaces the O(N) Python loop scanner
@@ -318,6 +373,23 @@ def simulate_day(
 
     random.shuffle(due_indices)
     reviews_done = 0
+
+    # Get weights or use defaults
+    w_success = (
+        weights["success"]
+        if weights
+        else [DEFAULT_PROB_HARD, DEFAULT_PROB_GOOD, DEFAULT_PROB_EASY]
+    )
+    w_first = (
+        weights["first"]
+        if weights
+        else [
+            DEFAULT_PROB_FIRST_AGAIN,
+            DEFAULT_PROB_FIRST_HARD,
+            DEFAULT_PROB_FIRST_GOOD,
+            DEFAULT_PROB_FIRST_EASY,
+        ]
+    )
 
     for idx in due_indices:
         if reviews_done >= review_limit:
@@ -334,7 +406,7 @@ def simulate_day(
         if random.random() < retrievability:
             rating = random.choices(
                 [Rating.Hard, Rating.Good, Rating.Easy],
-                weights=[PROB_HARD, PROB_GOOD, PROB_EASY],
+                weights=w_success,
             )[0]
         else:
             rating = Rating.Again
@@ -359,12 +431,7 @@ def simulate_day(
 
         rating = random.choices(
             [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-            weights=[
-                PROB_FIRST_AGAIN,
-                PROB_FIRST_HARD,
-                PROB_FIRST_GOOD,
-                PROB_FIRST_EASY,
-            ],
+            weights=w_first,
         )[0]
 
         updated_true_card, _ = nature_scheduler.review_card(
@@ -467,6 +534,7 @@ def run_simulation(
         sys_cards: list[Card] = []
         card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
         current_date = START_DATE
+        review_weights = None
 
         if seeded_data:
             # Use pre-calculated data
@@ -477,10 +545,12 @@ def run_simulation(
             true_cards = list(deepcopy(seeded_data["true_cards"]).values())
             sys_cards = list(deepcopy(seeded_data["sys_cards"]).values())
             card_logs = deepcopy(seeded_data["logs"])
+            review_weights = seeded_data.get("weights")
         elif seed_history:
             # Fallback to loading from disk (e.g. single simulation run)
             logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
+            review_weights = infer_review_weights(logs)
             for cid, logs_list in logs.items():
                 card = Card(card_id=cid)
                 true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
@@ -511,6 +581,7 @@ def run_simulation(
                 card_logs,
                 current_date,
                 review_limit,
+                weights=review_weights,
             )
             current_date += timedelta(days=1)
 
@@ -551,6 +622,7 @@ def run_simulation(
                     card_logs,
                     current_date,
                     review_limit,
+                    weights=review_weights,
                 )
                 current_date += timedelta(days=1)
 

@@ -128,6 +128,24 @@ def test_load_anki_history_missing_file() -> None:
     assert date == START_DATE
 
 
+def test_run_simulation_with_custom_weights() -> None:
+    weights = {"first": [0.1, 0.1, 0.7, 0.1], "success": [0.1, 0.8, 0.1]}
+    fitted, _, metrics = run_simulation(
+        n_days=5,
+        review_limit=10,
+        seeded_data={
+            "last_rev": datetime.now(timezone.utc),
+            "true_cards": {},
+            "sys_cards": {},
+            "logs": defaultdict(list),
+            "weights": weights,
+        },
+        verbose=False,
+    )
+    assert fitted is not None
+    assert metrics["review_count"] > 0
+
+
 def test_run_simulation_cli_basic(monkeypatch: Any) -> None:
     import sys
 

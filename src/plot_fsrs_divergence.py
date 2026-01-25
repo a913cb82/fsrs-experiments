@@ -20,6 +20,7 @@ try:
         ReviewLog,
         RustOptimizer,
         Scheduler,
+        infer_review_weights,
         load_anki_history,
         parse_parameters,
         run_simulation,
@@ -32,6 +33,7 @@ except ImportError:
             ReviewLog,
             RustOptimizer,
             Scheduler,
+            infer_review_weights,
             load_anki_history,
             parse_parameters,
             run_simulation,
@@ -224,6 +226,7 @@ def main() -> None:
     initial_params: tuple[float, ...] | None = None
     seeded_data: tuple[dict[int, list[ReviewLog]], datetime] | None = None
     initial_card_states: tuple[dict[int, Card], dict[int, Card]] | None = None
+    weights: dict[str, list[float]] | None = None
 
     if args.seed_history:
         tqdm.write(f"Loading Anki history from {args.seed_history}...")
@@ -233,6 +236,11 @@ def main() -> None:
         if logs:
             seeded_data = (logs, last_rev)
             flat_logs = [log for card_logs in logs.values() for log in card_logs]
+
+            # Infer weights from history
+            tqdm.write("Inferring rating probabilities from history...")
+            weights = infer_review_weights(logs)
+            tqdm.write(f"Inferred weights: {weights}")
 
             # Pre-fit initial parameters
             if len(flat_logs) >= 512:
@@ -264,6 +272,7 @@ def main() -> None:
             "last_rev": seeded_data[1],
             "true_cards": initial_card_states[0],
             "sys_cards": initial_card_states[1],
+            "weights": weights,
         }
 
     # Flatten configurations into individual tasks

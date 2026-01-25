@@ -67,3 +67,40 @@ def test_parse_parameters() -> None:
     assert parse_parameters("a,b,c") == tuple(DEFAULT_PARAMETERS)
     # Empty
     assert parse_parameters("") == tuple(DEFAULT_PARAMETERS)
+
+
+def test_infer_review_weights() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from src.simulate_fsrs import Rating, ReviewLog, infer_review_weights
+
+    now = datetime.now(timezone.utc)
+    # Card 1: 1st Good, 2nd Good
+    # Card 2: 1st Again, 2nd Hard, 3rd Easy
+    logs = {
+        1: [
+            ReviewLog(1, Rating.Good, now - timedelta(days=10), None),
+            ReviewLog(1, Rating.Good, now - timedelta(days=5), None),
+        ],
+        2: [
+            ReviewLog(2, Rating.Again, now - timedelta(days=20), None),
+            ReviewLog(2, Rating.Hard, now - timedelta(days=15), None),
+            ReviewLog(2, Rating.Easy, now - timedelta(days=10), None),
+        ],
+    }
+
+    weights = infer_review_weights(logs)
+
+    # First ratings: 1 Good (pos 3), 1 Again (pos 1) -> 50% each
+    assert weights["first"][0] == 0.5  # Again
+    assert weights["first"][1] == 0.0  # Hard
+    assert weights["first"][2] == 0.5  # Good
+    assert weights["first"][3] == 0.0  # Easy
+
+    # Subsequent Success (recalled) ratings:
+    # Card 1: Good (pos 2)
+    # Card 2: Hard (pos 1), Easy (pos 3)
+    # Total: 1 Hard, 1 Good, 1 Easy -> 33.3% each
+    assert abs(weights["success"][0] - 0.3333) < 0.001  # Hard
+    assert abs(weights["success"][1] - 0.3333) < 0.001  # Good
+    assert abs(weights["success"][2] - 0.3333) < 0.001  # Easy
