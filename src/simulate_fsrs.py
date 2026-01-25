@@ -50,7 +50,6 @@ class RustOptimizer:
             raise ImportError("fsrs-rs-python not installed.")
 
         # Convert ReviewLog objects to Rust-compatible FSRSItem objects.
-        # CRITICAL: FSRS-rs expects one FSRSItem per review (after the first).
         items_map = defaultdict(list)
         for log in self.review_logs:
             items_map[log.card_id].append(log)
@@ -403,6 +402,22 @@ def run_simulation(
             if verbose:
                 tqdm.write(f"Error during final optimization: {e}")
 
+        # Reconstruct final stabilities for all cards using the final fitted params
+        # This allows comparing the "true" nature curve vs "fitted" curve
+        # for every card.
+        stabilities: list[tuple[float, float]] = []
+        if fitted_params:
+            final_algo_scheduler = Scheduler(parameters=tuple(fitted_params))
+            for cid in true_cards:
+                s_nat = true_cards[cid].stability or 0.0
+                # Use reschedule_card to get the stability this card WOULD have
+                # under the final optimized parameters.
+                rescheduled = final_algo_scheduler.reschedule_card(
+                    Card(card_id=cid), card_logs[cid]
+                )
+                s_alg = rescheduled.stability or 0.0
+                stabilities.append((s_nat, s_alg))
+
         return (
             fitted_params,
             ground_truth_params,
@@ -411,6 +426,7 @@ def run_simulation(
                 "log_prob_sum": log_prob_sum,
                 "review_count": len(all_logs),
                 "card_count": len(true_cards),
+                "stabilities": stabilities,
             },
         )
     finally:

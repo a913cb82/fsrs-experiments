@@ -25,23 +25,51 @@ def calculate_retrievability(
 
 
 def calculate_metrics(
-    gt_r: np.ndarray[Any, Any], fitted_r: np.ndarray[Any, Any]
+    gt_params: list[float] | tuple[float, ...],
+    fit_params: list[float] | tuple[float, ...],
+    stabilities: list[tuple[float, float]],
 ) -> tuple[float, float]:
     """
-    Calculate RMSE and Mean KL Divergence between ground truth and fitted curves.
+    Calculate RMSE and Mean KL Divergence between ground truth and fitted curves,
+    averaged across all cards in the simulation.
     """
-    # RMSE
-    rmse = float(np.sqrt(np.mean((gt_r - fitted_r) ** 2)))
+    if not stabilities:
+        return 0.0, 0.0
 
-    # KL Divergence between Bernoulli distributions at each t
-    p = np.clip(gt_r, 1e-10, 1 - 1e-10)
-    q = np.clip(fitted_r, 1e-10, 1 - 1e-10)
+    t_eval = np.linspace(0, 100, 200)
 
-    # KL(P || Q) for Bernoulli is sum of KL for each outcome
-    kl = entropy(p, q) + entropy(1 - p, 1 - q)
-    mean_kl = float(np.mean(kl))
+    # Pre-calculate nature curve parameters
+    decay_nat = -gt_params[20]
+    factor_nat = 0.9 ** (1 / decay_nat) - 1
 
-    return rmse, mean_kl
+    # Pre-calculate algorithm curve parameters
+    decay_alg = -fit_params[20]
+    factor_alg = 0.9 ** (1 / decay_alg) - 1
+
+    all_rmse = []
+    all_kl = []
+
+    for s_nat, s_alg in stabilities:
+        # Avoid division by zero
+        s_nat = max(s_nat, 0.001)
+        s_alg = max(s_alg, 0.001)
+
+        # Nature curve for this card
+        r_nat = (1 + factor_nat * t_eval / s_nat) ** decay_nat
+        # Fitted curve for this card
+        r_alg = (1 + factor_alg * t_eval / s_alg) ** decay_alg
+
+        # RMSE for this card
+        rmse = np.sqrt(np.mean((r_nat - r_alg) ** 2))
+        all_rmse.append(rmse)
+
+        # KL for this card
+        p = np.clip(r_nat, 1e-10, 1 - 1e-10)
+        q = np.clip(r_alg, 1e-10, 1 - 1e-10)
+        kl = entropy(p, q) + entropy(1 - p, 1 - q)
+        all_kl.append(np.mean(kl))
+
+    return float(np.mean(all_rmse)), float(np.mean(all_kl))
 
 
 def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
@@ -81,7 +109,7 @@ def plot_forgetting_curves(results: list[dict[str, Any]]) -> None:
 def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
     """Worker function for multiprocessing."""
     try:
-        fitted, gt, _metrics = run_simulation(
+        fitted, gt, metrics = run_simulation(
             n_days=task["days"],
             review_limit=task["reviews"],
             retention=task["retention"],
@@ -94,6 +122,7 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             "config_key": task["config_key"],
             "fitted": fitted,
             "gt": gt,
+            "stabilities": metrics.get("stabilities", []),
             "success": fitted is not None,
         }
     except Exception as e:
@@ -162,8 +191,14 @@ def main() -> None:
             res = future.result()
             if res["success"]:
                 fitted = res["fitted"]
+                gt_params_res = res["gt"]
+                stabilities = res["stabilities"]
+
+                # Metrics for this repeat: averaged across all cards
+                rmse, kl = calculate_metrics(gt_params_res, fitted, stabilities)
+
+                # Still calculate Scenario Curve for plotting
                 fit_r = calculate_retrievability(t_eval, fitted[2], fitted)
-                rmse, kl = calculate_metrics(gt_r, fit_r)
 
                 key = res["config_key"]
                 aggregated_results[key].append(fit_r)
