@@ -2,8 +2,10 @@ import argparse
 import concurrent.futures
 import itertools
 import multiprocessing
+import os
 import sys
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 import matplotlib.pyplot as plt
@@ -13,7 +15,11 @@ from tqdm import tqdm
 
 try:
     from simulate_fsrs import (
+        DEFAULT_PARAMETERS,
+        Card,
+        ReviewLog,
         RustOptimizer,
+        Scheduler,
         load_anki_history,
         parse_parameters,
         run_simulation,
@@ -21,18 +27,24 @@ try:
 except ImportError:
     try:
         from .simulate_fsrs import (
+            DEFAULT_PARAMETERS,
+            Card,
+            ReviewLog,
             RustOptimizer,
+            Scheduler,
             load_anki_history,
             parse_parameters,
             run_simulation,
         )
     except ImportError:
         # Fallback for direct execution when src is not in sys.path
-        import os
-
         sys.path.append(os.path.dirname(os.path.abspath(__file__)))
         from simulate_fsrs import (
+            DEFAULT_PARAMETERS,
+            Card,
+            ReviewLog,
             RustOptimizer,
+            Scheduler,
             load_anki_history,
             parse_parameters,
             run_simulation,
@@ -165,10 +177,8 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             verbose=False,
             seed=task["seed"],
             ground_truth=task.get("ground_truth"),
-            seed_history=task.get("seed_history"),
-            deck_config=task.get("deck_config"),
-            deck_name=task.get("deck_name"),
             initial_params=task.get("initial_params"),
+            seeded_data=task.get("seeded_data"),
         )
         return {
             "config_key": task["config_key"],
@@ -196,21 +206,55 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    gt_params_input = parse_parameters(args.ground_truth) if args.ground_truth else None
+    gt_params_input = (
+        parse_parameters(args.ground_truth) if args.ground_truth else DEFAULT_PARAMETERS
+    )
 
-    # 1. Pre-fit initial parameters from seeded history if provided
+    # 1. Load history ONCE and pre-calculate initial states
     initial_params: tuple[float, ...] | None = None
+    seeded_data: tuple[dict[int, list[ReviewLog]], datetime] | None = None
+    initial_card_states: tuple[dict[int, Card], dict[int, Card]] | None = None
+
     if args.seed_history:
-        tqdm.write("Pre-fitting initial parameters from seeded history...")
-        logs, _ = load_anki_history(args.seed_history, args.deck_config, args.deck_name)
-        flat_logs = [log for card_logs in logs.values() for log in card_logs]
-        if len(flat_logs) >= 512:
-            initial_params = tuple(
-                RustOptimizer(flat_logs).compute_optimal_parameters()
-            )
-            tqdm.write(f"Initial params fitted: {initial_params}")
-        else:
-            tqdm.write("Not enough logs for pre-fitting. Using defaults.")
+        tqdm.write(f"Loading Anki history from {args.seed_history}...")
+        logs, last_rev = load_anki_history(
+            args.seed_history, args.deck_config, args.deck_name
+        )
+        if logs:
+            seeded_data = (logs, last_rev)
+            flat_logs = [log for card_logs in logs.values() for log in card_logs]
+
+            # Pre-fit initial parameters
+            if len(flat_logs) >= 512:
+                tqdm.write("Pre-fitting initial parameters from history...")
+                initial_params = tuple(
+                    RustOptimizer(flat_logs).compute_optimal_parameters()
+                )
+                tqdm.write(f"Initial params fitted: {initial_params}")
+            else:
+                tqdm.write("Not enough logs for pre-fitting. Using defaults.")
+
+            # Pre-calculate card states (History Replay)
+            tqdm.write("Pre-calculating initial card states (replaying history)...")
+            nat_sch = Scheduler(parameters=gt_params_input)
+            alg_sch = Scheduler(parameters=initial_params or DEFAULT_PARAMETERS)
+
+            true_cards: dict[int, Card] = {}
+            sys_cards: dict[int, Card] = {}
+            for cid, card_logs in logs.items():
+                true_cards[cid] = nat_sch.reschedule_card(Card(card_id=cid), card_logs)
+                sys_cards[cid] = alg_sch.reschedule_card(Card(card_id=cid), card_logs)
+            initial_card_states = (true_cards, sys_cards)
+
+    # Combine pre-calculated data
+    seeded_payload = None
+    if seeded_data and initial_card_states:
+        seeded_payload = {
+            "logs": seeded_data[0],
+            "last_rev": seeded_data[1],
+            "true_cards": initial_card_states[0],
+            "sys_cards": initial_card_states[1],
+        }
 
     # Flatten configurations into individual tasks
     tasks = []
@@ -228,10 +272,8 @@ def main() -> None:
                     "seed": 42 + i,
                     "config_key": config_key,
                     "ground_truth": gt_params_input,
-                    "seed_history": args.seed_history,
-                    "deck_config": args.deck_config,
-                    "deck_name": args.deck_name,
                     "initial_params": initial_params,
+                    "seeded_data": seeded_payload,
                 }
             )
 
@@ -240,13 +282,11 @@ def main() -> None:
         n_days=1,
         verbose=False,
         ground_truth=gt_params_input,
-        seed_history=args.seed_history,
-        deck_config=args.deck_config,
-        deck_name=args.deck_name,
         initial_params=initial_params,
+        seeded_data=seeded_payload,
     )
     s_nat_base = np.array([s[0] for s in baseline_metrics.get("stabilities", [])])
-    gt_r_base = calculate_population_retrievability(t_eval, s_nat_base, gt_params)
+    gt_r_base = calculate_population_retrievability(t_eval, s_nat_base, gt_params_input)
 
     # Map to store population results for averaging
     aggregated_r_fit = defaultdict(list)

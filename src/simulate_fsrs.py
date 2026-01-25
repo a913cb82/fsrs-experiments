@@ -49,6 +49,8 @@ __all__ = [
     "RustOptimizer",
     "ReviewLog",
     "Rating",
+    "Card",
+    "Scheduler",
     "DEFAULT_PARAMETERS",
 ]
 
@@ -179,10 +181,9 @@ def load_anki_history(
 
             res_d_configs: dict[int, int] = {}
             for row in decks:
-                did_v, name_v, blob_v = row[0], row[1], row[2]
-                if did_v is None or name_v is None or blob_v is None:
+                if row[0] is None or row[1] is None or row[2] is None:
                     continue
-                d_id, d_name, d_blob = int(did_v), str(name_v), bytes(blob_v)
+                d_id, d_name, d_blob = int(row[0]), str(row[1]), bytes(row[2])
                 c_id = get_deck_config_id(d_blob)
                 if c_id is None:
                     parts = d_name.split("::")
@@ -202,10 +203,9 @@ def load_anki_history(
 
             # Filter decks
             for row in decks:
-                did_v, name_v = row[0], row[1]
-                if did_v is None or name_v is None:
+                if row[0] is None or row[1] is None:
                     continue
-                d_id, d_name = int(did_v), str(name_v)
+                d_id, d_name = int(row[0]), str(row[1])
                 if deck_name and d_name != deck_name:
                     continue
                 if t_cid is not None:
@@ -415,6 +415,7 @@ def run_simulation(
     deck_config: str | None = None,
     deck_name: str | None = None,
     initial_params: tuple[float, ...] | None = None,
+    seeded_data: dict[str, Any] | None = None,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
@@ -451,17 +452,26 @@ def run_simulation(
         card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
         current_date = START_DATE
 
-        if seed_history:
-            seeded_logs, last_rev = load_anki_history(
-                seed_history, deck_config, deck_name
-            )
+        if seeded_data:
+            # Use pre-calculated data
+            current_date = seeded_data["last_rev"] + timedelta(days=1)
+            # We must deepcopy card objects because they are
+            # modified in-place during simulation
+            true_cards = deepcopy(seeded_data["true_cards"])
+            sys_cards = deepcopy(seeded_data["sys_cards"])
+            card_logs = deepcopy(seeded_data["logs"])
+        elif seed_history:
+            # Fallback to loading from disk (e.g. single simulation run)
+            logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
-            for cid, logs in seeded_logs.items():
+            for cid, logs_list in logs.items():
                 true_cards[cid] = nature_scheduler.reschedule_card(
-                    Card(card_id=cid), logs
+                    Card(card_id=cid), logs_list
                 )
-                sys_cards[cid] = algo_scheduler.reschedule_card(Card(card_id=cid), logs)
-                card_logs[cid].extend(logs)
+                sys_cards[cid] = algo_scheduler.reschedule_card(
+                    Card(card_id=cid), logs_list
+                )
+                card_logs[cid].extend(logs_list)
 
         limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
         pbar_p1 = (
@@ -529,7 +539,7 @@ def run_simulation(
                 )
                 current_date += timedelta(days=1)
 
-        all_logs = [log for logs in card_logs.values() for log in logs]
+        all_logs_final = [log for logs in card_logs.values() for log in logs]
         total_retrievability = 0.0
         end_date = current_date
         log_prob_sum = 0.0
@@ -544,7 +554,7 @@ def run_simulation(
 
         fitted_params = None
         try:
-            optimizer = RustOptimizer(all_logs)
+            optimizer = RustOptimizer(all_logs_final)
             fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
         except Exception:
             pass
@@ -566,7 +576,7 @@ def run_simulation(
             {
                 "total_retention": total_retrievability,
                 "log_prob_sum": log_prob_sum,
-                "review_count": len(all_logs),
+                "review_count": len(all_logs_final),
                 "card_count": len(true_cards),
                 "stabilities": stabilities,
             },
