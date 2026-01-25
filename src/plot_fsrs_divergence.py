@@ -10,7 +10,7 @@ import numpy as np
 from scipy.stats import entropy
 from tqdm import tqdm
 
-from simulate_fsrs import parse_parameters, run_simulation
+from .simulate_fsrs import parse_parameters, run_simulation
 
 
 def calculate_population_retrievability(
@@ -141,6 +141,7 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             ground_truth=task.get("ground_truth"),
             seed_history=task.get("seed_history"),
             deck_config=task.get("deck_config"),
+            deck_name=task.get("deck_name"),
             initial_params=task.get("initial_params"),
         )
         return {
@@ -165,6 +166,7 @@ def main() -> None:
     parser.add_argument("--ground-truth", type=str, help="Comma-separated parameters")
     parser.add_argument("--seed-history", type=str, help="Path to collection.anki2")
     parser.add_argument("--deck-config", type=str, help="Anki deck options preset name")
+    parser.add_argument("--deck-name", type=str, help="Anki deck name")
 
     args = parser.parse_args()
 
@@ -173,7 +175,7 @@ def main() -> None:
     # 1. Pre-fit initial parameters from seeded history if provided
     initial_params: tuple[float, ...] | None = None
     if args.seed_history:
-        from simulate_fsrs import RustOptimizer, load_anki_history
+        from .simulate_fsrs import RustOptimizer, load_anki_history
 
         tqdm.write("Pre-fitting initial parameters from seeded history...")
         logs, _ = load_anki_history(args.seed_history, args.deck_config)
@@ -204,6 +206,7 @@ def main() -> None:
                     "ground_truth": gt_params_input,
                     "seed_history": args.seed_history,
                     "deck_config": args.deck_config,
+                    "deck_name": args.deck_name,
                     "initial_params": initial_params,
                 }
             )
@@ -215,6 +218,7 @@ def main() -> None:
         ground_truth=gt_params_input,
         seed_history=args.seed_history,
         deck_config=args.deck_config,
+        deck_name=args.deck_name,
         initial_params=initial_params,
     )
     s_nat_base = np.array([s[0] for s in baseline_metrics.get("stabilities", [])])
