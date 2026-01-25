@@ -140,6 +140,8 @@ def run_single_task(task: dict[str, Any]) -> dict[str, Any]:
             seed=task["seed"],
             ground_truth=task.get("ground_truth"),
             seed_history=task.get("seed_history"),
+            deck_config=task.get("deck_config"),
+            initial_params=task.get("initial_params"),
         )
         return {
             "config_key": task["config_key"],
@@ -162,11 +164,29 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=multiprocessing.cpu_count())
     parser.add_argument("--ground-truth", type=str, help="Comma-separated parameters")
     parser.add_argument("--seed-history", type=str, help="Path to collection.anki2")
+    parser.add_argument("--deck-config", type=str, help="Anki deck options preset name")
 
     args = parser.parse_args()
 
     gt_params_input = parse_parameters(args.ground_truth) if args.ground_truth else None
 
+    # 1. Pre-fit initial parameters from seeded history if provided
+    initial_params: tuple[float, ...] | None = None
+    if args.seed_history:
+        from simulate_fsrs import RustOptimizer, load_anki_history
+
+        tqdm.write("Pre-fitting initial parameters from seeded history...")
+        logs, _ = load_anki_history(args.seed_history, args.deck_config)
+        flat_logs = [log for card_logs in logs.values() for log in card_logs]
+        if len(flat_logs) >= 512:
+            initial_params = tuple(
+                RustOptimizer(flat_logs).compute_optimal_parameters()
+            )
+            tqdm.write(f"Initial params fitted: {initial_params}")
+        else:
+            tqdm.write("Not enough logs for pre-fitting. Using defaults.")
+
+    # Flatten configurations into individual tasks
     tasks = []
     for burn_in, days, reviews, retention in itertools.product(
         args.burn_ins, args.days, args.reviews, args.retentions
@@ -183,6 +203,8 @@ def main() -> None:
                     "config_key": config_key,
                     "ground_truth": gt_params_input,
                     "seed_history": args.seed_history,
+                    "deck_config": args.deck_config,
+                    "initial_params": initial_params,
                 }
             )
 
