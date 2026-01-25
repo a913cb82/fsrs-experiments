@@ -64,17 +64,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--retentions",
-        type=float,
-        nargs="+",
-        default=[0.9],
-        help="List of target retentions",
-    )
-    parser.add_argument(
-        "--retention-schedules",
         type=str,
-        nargs="*",
-        default=[],
-        help="List of retention schedules (e.g. '5:0.7,1:0.9')",
+        nargs="+",
+        default=["0.9"],
+        help="List of target retentions (floats or schedules)",
     )
     parser.add_argument(
         "--burn-ins", type=int, nargs="+", default=[0], help="List of burn-in periods"
@@ -89,7 +82,6 @@ def main() -> None:
     for burn_in in args.burn_ins:
         for days in args.days:
             for reviews in args.reviews:
-                # Fixed retentions
                 for retention in args.retentions:
                     print(
                         f"Running config: Days={days}, Reviews={reviews}, "
@@ -99,7 +91,7 @@ def main() -> None:
                         fitted, gt, _metrics = run_simulation(
                             n_days=days,
                             review_limit=reviews,
-                            desired_retention=retention,
+                            retention=retention,
                             burn_in_days=burn_in,
                             verbose=False,
                         )
@@ -115,42 +107,6 @@ def main() -> None:
                         label = (
                             f"Fit (D={days}, R={reviews}, "
                             f"Ret={retention}, BI={burn_in})"
-                        )
-                        results.append({"label": label, "params": fitted})
-                        mse = sum(
-                            (f - g) ** 2 for f, g in zip(fitted, gt, strict=False)
-                        ) / len(fitted)
-                        print(f"Completed config. MSE: {mse:.6f}")
-
-                    except Exception as e:
-                        print(f"Simulation failed for config: {e}")
-                        traceback.print_exc()
-
-                # Scheduled retentions
-                for schedule in args.retention_schedules:
-                    print(
-                        f"Running config: Days={days}, Reviews={reviews}, "
-                        f"Schedule={schedule}, Burn-in={burn_in}"
-                    )
-                    try:
-                        fitted, gt, _metrics = run_simulation(
-                            n_days=days,
-                            review_limit=reviews,
-                            retention_schedule=schedule,
-                            burn_in_days=burn_in,
-                            verbose=False,
-                        )
-
-                        if fitted is None:
-                            print("Optimization failed. Skipping.")
-                            continue
-
-                        if not ground_truth_captured:
-                            results.append({"label": "Ground Truth", "params": gt})
-                            ground_truth_captured = True
-
-                        label = (
-                            f"Fit (D={days}, R={reviews}, S={schedule}, BI={burn_in})"
                         )
                         results.append({"label": label, "params": fitted})
                         mse = sum(

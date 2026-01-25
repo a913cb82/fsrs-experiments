@@ -131,14 +131,17 @@ def simulate_day(
 
 
 def parse_retention_schedule(
-    schedule_str: str | None,
-) -> list[tuple[int, float]] | None:
+    schedule_str: str,
+) -> list[tuple[int, float]]:
     """
-    Parses a schedule string like "5:0.7,1:0.9" into a list of (days, retention).
+    Parses a schedule string like "5:0.7,1:0.9" or a constant float like "0.9"
+    into a list of (days, retention).
     """
-    if not schedule_str:
-        return None
     try:
+        if ":" not in schedule_str:
+            # Constant retention
+            return [(1, float(schedule_str))]
+
         segments = []
         parts = schedule_str.split(",")
         for part in parts:
@@ -147,19 +150,17 @@ def parse_retention_schedule(
         return segments
     except ValueError:
         print(
-            f"Invalid schedule format: {schedule_str}. "
-            "Expected format 'days:retention,days:retention' (e.g. '5:0.7,1:0.9')"
+            f"Invalid retention format: {schedule_str}. "
+            "Expected float (e.g. '0.9') or schedule (e.g. '5:0.7,1:0.9')"
         )
-        return None
+        return [(1, 0.9)]  # Default fallback
 
 
 def get_retention_for_day(
-    day: int, schedule_segments: list[tuple[int, float]] | None
+    day: int, schedule_segments: list[tuple[int, float]]
 ) -> float:
-    if not schedule_segments:
-        return 0.9  # Default fallback
-
     total_duration = sum(d for d, r in schedule_segments)
+
     day_in_cycle = day % total_duration
 
     current_pos = 0
@@ -174,20 +175,17 @@ def run_simulation(
     n_days: int = 365,
     burn_in_days: int = 0,
     review_limit: int = 200,
-    desired_retention: float = 0.9,
-    retention_schedule: str | None = None,
+    retention: str = "0.9",
     verbose: bool = True,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
+    parsed_schedule = parse_retention_schedule(retention)
+    initial_retention = get_retention_for_day(0, parsed_schedule)
+
     if verbose:
-        schedule_info = (
-            f", Schedule: {retention_schedule}"
-            if retention_schedule
-            else f", Retention: {desired_retention}"
-        )
         burn_in_info = f", Burn-in: {burn_in_days} days" if burn_in_days > 0 else ""
         print(
             f"Starting simulation: {n_days} days{burn_in_info}, "
-            f"{review_limit} reviews/day{schedule_info}"
+            f"{review_limit} reviews/day, Retention: {retention}"
         )
 
     # Set seed for reproducibility
@@ -203,16 +201,12 @@ def run_simulation(
 
     # Nature Scheduler: Always Ground Truth
     nature_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=desired_retention
+        parameters=ground_truth_params, desired_retention=initial_retention
     )
 
     # Algo Scheduler: Initially Ground Truth, changes after burn-in
     algo_scheduler = Scheduler(
-        parameters=ground_truth_params, desired_retention=desired_retention
-    )
-
-    parsed_schedule = (
-        parse_retention_schedule(retention_schedule) if retention_schedule else None
+        parameters=ground_truth_params, desired_retention=initial_retention
     )
 
     # Two maps to track divergent states
@@ -230,9 +224,8 @@ def run_simulation(
         if verbose and day % 30 == 0:
             print(f"Simulating day {day}/{n_days}...")
 
-        if parsed_schedule:
-            daily_retention = get_retention_for_day(day, parsed_schedule)
-            algo_scheduler.desired_retention = daily_retention
+        daily_retention = get_retention_for_day(day, parsed_schedule)
+        algo_scheduler.desired_retention = daily_retention
 
         simulate_day(
             nature_scheduler,
@@ -289,9 +282,8 @@ def run_simulation(
             if verbose and day % 30 == 0:
                 print(f"Simulating day {day}/{n_days}...")
 
-            if parsed_schedule:
-                daily_retention = get_retention_for_day(day, parsed_schedule)
-                algo_scheduler.desired_retention = daily_retention
+            daily_retention = get_retention_for_day(day, parsed_schedule)
+            algo_scheduler.desired_retention = daily_retention
 
             simulate_day(
                 nature_scheduler,
@@ -379,7 +371,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--reviews", type=int, default=200, help="Daily review limit")
     parser.add_argument(
-        "--retention", type=float, default=0.9, help="Desired retention"
+        "--retention", type=str, default="0.9", help="Retention (float or schedule)"
     )
     parser.add_argument("--burn-in", type=int, default=0, help="Burn-in days")
 
@@ -388,6 +380,6 @@ if __name__ == "__main__":
     run_simulation(
         n_days=args.days,
         review_limit=args.reviews,
-        desired_retention=args.retention,
+        retention=args.retention,
         burn_in_days=args.burn_in,
     )
