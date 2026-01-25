@@ -18,6 +18,7 @@ dist/
 *.egg-info
 
 # Project specific
+.coverage
 forgetting_curve_divergence.png
 py-fsrs-repo/
 fsrs-rs-python-repo/
