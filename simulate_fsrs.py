@@ -1,19 +1,20 @@
 import argparse
-import random
 import math
+import random
 import sys
 import traceback
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
-# Ensure we can import fsrs if it's not in path for some reason, 
+# Ensure we can import fsrs if it's not in path for some reason,
 # though we installed it.
 try:
-    from fsrs import Scheduler, Card, Rating, ReviewLog, Optimizer, State
+    from fsrs import Card, Optimizer, Rating, ReviewLog, Scheduler
     from fsrs.scheduler import DEFAULT_PARAMETERS
 except ImportError:
-    # Fallback to local import if installed in venv but not picked up? 
+    # Fallback to local import if installed in venv but not picked up?
     # Should be fine as we verified install.
     sys.exit("Error: fsrs package not found. Please install it.")
 
@@ -31,80 +32,107 @@ PROB_FIRST_HARD = 0.2
 PROB_FIRST_GOOD = 0.5
 PROB_FIRST_EASY = 0.1
 
-def simulate_day(nature_scheduler, algo_scheduler, true_cards, sys_cards, card_logs, current_date, review_limit):
+
+def simulate_day(
+    nature_scheduler: Scheduler,
+    algo_scheduler: Scheduler,
+    true_cards: dict[int, Card],
+    sys_cards: dict[int, Card],
+    card_logs: dict[int, list[ReviewLog]],
+    current_date: datetime,
+    review_limit: int,
+) -> None:
     # Identify due cards based on SYSTEM scheduler
     due_cards = []
     for card in sys_cards.values():
         if card.due <= current_date:
-             due_cards.append(card)
-    
+            due_cards.append(card)
+
     # Sort due cards or shuffle
     random.shuffle(due_cards)
 
     reviews_done = 0
-    
+
     # Review due cards
     for sys_card in due_cards:
         if reviews_done >= review_limit:
             break
-        
+
         card_id = sys_card.card_id
         true_card = true_cards[card_id]
-            
+
         # Calculate retrievability using NATURE (Ground Truth)
-        retrievability = nature_scheduler.get_card_retrievability(true_card, current_date)
-        
+        retrievability = nature_scheduler.get_card_retrievability(
+            true_card, current_date
+        )
+
         # Determine outcome
         if random.random() < retrievability:
             # Success
             rating = random.choices(
-                [Rating.Hard, Rating.Good, Rating.Easy], 
-                weights=[PROB_HARD, PROB_GOOD, PROB_EASY]
+                [Rating.Hard, Rating.Good, Rating.Easy],
+                weights=[PROB_HARD, PROB_GOOD, PROB_EASY],
             )[0]
         else:
             # Fail
             rating = Rating.Again
-            
+
         # Update NATURE state (updates P(Recall) for future)
-        updated_true_card, _ = nature_scheduler.review_card(true_card, rating, current_date)
+        updated_true_card, _ = nature_scheduler.review_card(
+            true_card, rating, current_date
+        )
         true_cards[card_id] = updated_true_card
-        
+
         # Update SYSTEM state (calculates interval using Algo Params)
-        updated_sys_card, log = algo_scheduler.review_card(sys_card, rating, current_date)
+        updated_sys_card, log = algo_scheduler.review_card(
+            sys_card, rating, current_date
+        )
         sys_cards[card_id] = updated_sys_card
-        
+
         card_logs[card_id].append(log)
         reviews_done += 1
 
     # Review new cards
     while reviews_done < review_limit:
         # Create a new card
-        # We need to ensure both schedulers see the same new card (same ID/creation time)
+        # We need to ensure both schedulers see the same new card
         # Card() uses time.sleep(0.001) to ensure unique IDs based on time
         base_card = Card()
-        
+
         # Deepcopy to ensure independent state evolution
         true_card = deepcopy(base_card)
         sys_card = deepcopy(base_card)
-        
+
         # Determine first rating
         rating = random.choices(
             [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-            weights=[PROB_FIRST_AGAIN, PROB_FIRST_HARD, PROB_FIRST_GOOD, PROB_FIRST_EASY]
+            weights=[
+                PROB_FIRST_AGAIN,
+                PROB_FIRST_HARD,
+                PROB_FIRST_GOOD,
+                PROB_FIRST_EASY,
+            ],
         )[0]
-        
+
         # Update both
-        updated_true_card, _ = nature_scheduler.review_card(true_card, rating, current_date)
-        updated_sys_card, log = algo_scheduler.review_card(sys_card, rating, current_date)
-        
+        updated_true_card, _ = nature_scheduler.review_card(
+            true_card, rating, current_date
+        )
+        updated_sys_card, log = algo_scheduler.review_card(
+            sys_card, rating, current_date
+        )
+
         # Add to maps
         true_cards[updated_true_card.card_id] = updated_true_card
         sys_cards[updated_sys_card.card_id] = updated_sys_card
         card_logs[updated_sys_card.card_id].append(log)
-        
+
         reviews_done += 1
 
-def parse_retention_schedule(schedule_str):
+
+def parse_retention_schedule(
+    schedule_str: str | None,
+) -> list[tuple[int, float]] | None:
     """
     Parses a schedule string like "5:0.7,1:0.9" into a list of (days, retention).
     """
@@ -112,22 +140,28 @@ def parse_retention_schedule(schedule_str):
         return None
     try:
         segments = []
-        parts = schedule_str.split(',')
+        parts = schedule_str.split(",")
         for part in parts:
-            d, r = part.split(':')
+            d, r = part.split(":")
             segments.append((int(d), float(r)))
         return segments
     except ValueError:
-        print(f"Invalid schedule format: {schedule_str}. Expected format 'days:retention,days:retention' (e.g. '5:0.7,1:0.9')")
+        print(
+            f"Invalid schedule format: {schedule_str}. "
+            "Expected format 'days:retention,days:retention' (e.g. '5:0.7,1:0.9')"
+        )
         return None
 
-def get_retention_for_day(day, schedule_segments):
+
+def get_retention_for_day(
+    day: int, schedule_segments: list[tuple[int, float]] | None
+) -> float:
     if not schedule_segments:
-        return 0.9 # Default fallback
-    
+        return 0.9  # Default fallback
+
     total_duration = sum(d for d, r in schedule_segments)
     day_in_cycle = day % total_duration
-    
+
     current_pos = 0
     for duration, retention in schedule_segments:
         if current_pos <= day_in_cycle < current_pos + duration:
@@ -135,59 +169,90 @@ def get_retention_for_day(day, schedule_segments):
         current_pos += duration
     return schedule_segments[-1][1]
 
-def run_simulation(n_days=365, burn_in_days=0, review_limit=200, desired_retention=0.9, retention_schedule=None, verbose=True):
+
+def run_simulation(
+    n_days: int = 365,
+    burn_in_days: int = 0,
+    review_limit: int = 200,
+    desired_retention: float = 0.9,
+    retention_schedule: str | None = None,
+    verbose: bool = True,
+) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     if verbose:
-        schedule_info = f", Schedule: {retention_schedule}" if retention_schedule else f", Retention: {desired_retention}"
+        schedule_info = (
+            f", Schedule: {retention_schedule}"
+            if retention_schedule
+            else f", Retention: {desired_retention}"
+        )
         burn_in_info = f", Burn-in: {burn_in_days} days" if burn_in_days > 0 else ""
-        print(f"Starting simulation: {n_days} days{burn_in_info}, {review_limit} reviews/day{schedule_info}")
-    
+        print(
+            f"Starting simulation: {n_days} days{burn_in_info}, "
+            f"{review_limit} reviews/day{schedule_info}"
+        )
+
     # Set seed for reproducibility
     random.seed(42)
     try:
+        import torch
+
         torch.manual_seed(42)
-    except NameError:
-        pass 
-    
+    except ImportError:
+        pass
+
     ground_truth_params = DEFAULT_PARAMETERS
-    
+
     # Nature Scheduler: Always Ground Truth
-    nature_scheduler = Scheduler(parameters=ground_truth_params, desired_retention=desired_retention) 
-    
+    nature_scheduler = Scheduler(
+        parameters=ground_truth_params, desired_retention=desired_retention
+    )
+
     # Algo Scheduler: Initially Ground Truth, changes after burn-in
-    algo_scheduler = Scheduler(parameters=ground_truth_params, desired_retention=desired_retention)
-    
-    parsed_schedule = parse_retention_schedule(retention_schedule) if retention_schedule else None
-    
+    algo_scheduler = Scheduler(
+        parameters=ground_truth_params, desired_retention=desired_retention
+    )
+
+    parsed_schedule = (
+        parse_retention_schedule(retention_schedule) if retention_schedule else None
+    )
+
     # Two maps to track divergent states
-    true_cards = {} # ID -> Card (Nature State)
-    sys_cards = {}  # ID -> Card (Algo State)
-    
-    card_logs = defaultdict(list)
-    
+    true_cards: dict[int, Card] = {}  # ID -> Card (Nature State)
+    sys_cards: dict[int, Card] = {}  # ID -> Card (Algo State)
+
+    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
+
     current_date = START_DATE
-    
+
     # PHASE 1: Burn-in (or full run if burn_in_days=0)
     limit_phase_1 = burn_in_days if burn_in_days > 0 else n_days
-    
+
     for day in range(limit_phase_1):
         if verbose and day % 30 == 0:
             print(f"Simulating day {day}/{n_days}...")
-            
+
         if parsed_schedule:
             daily_retention = get_retention_for_day(day, parsed_schedule)
             algo_scheduler.desired_retention = daily_retention
-            
-        simulate_day(nature_scheduler, algo_scheduler, true_cards, sys_cards, card_logs, current_date, review_limit)
+
+        simulate_day(
+            nature_scheduler,
+            algo_scheduler,
+            true_cards,
+            sys_cards,
+            card_logs,
+            current_date,
+            review_limit,
+        )
         current_date += timedelta(days=1)
-        
+
     # PHASE 2: After burn-in
     if burn_in_days > 0 and burn_in_days < n_days:
         if verbose:
             print(f"Burn-in complete ({burn_in_days} days). Fitting parameters...")
-        
+
         # Flatten logs for optimizer
         all_logs = [log for logs in card_logs.values() for log in logs]
-        
+
         if len(all_logs) >= 512:
             try:
                 optimizer = Optimizer(all_logs)
@@ -195,17 +260,22 @@ def run_simulation(n_days=365, burn_in_days=0, review_limit=200, desired_retenti
                 if verbose:
                     print("Burn-in Fit Complete. Updating Scheduler.")
                     print(f"Intermediate Params: {fitted_params}")
-                
+
                 # Update Algo Scheduler with fitted params
-                algo_scheduler = Scheduler(parameters=fitted_params, desired_retention=algo_scheduler.desired_retention)
-                
+                algo_scheduler = Scheduler(
+                    parameters=fitted_params,
+                    desired_retention=algo_scheduler.desired_retention,
+                )
+
                 # Reschedule existing cards
                 if verbose:
                     print("Rescheduling existing cards with new parameters...")
-                    
+
                 for cid in sys_cards:
-                    sys_cards[cid] = algo_scheduler.reschedule_card(sys_cards[cid], card_logs[cid])
-                    
+                    sys_cards[cid] = algo_scheduler.reschedule_card(
+                        sys_cards[cid], card_logs[cid]
+                    )
+
             except Exception as e:
                 print(f"Burn-in optimization failed: {e}")
                 if verbose:
@@ -213,7 +283,7 @@ def run_simulation(n_days=365, burn_in_days=0, review_limit=200, desired_retenti
         else:
             if verbose:
                 print("Not enough logs for burn-in fit. Continuing with Ground Truth.")
-        
+
         # Resume simulation
         for day in range(burn_in_days, n_days):
             if verbose and day % 30 == 0:
@@ -222,77 +292,102 @@ def run_simulation(n_days=365, burn_in_days=0, review_limit=200, desired_retenti
             if parsed_schedule:
                 daily_retention = get_retention_for_day(day, parsed_schedule)
                 algo_scheduler.desired_retention = daily_retention
-                
-            simulate_day(nature_scheduler, algo_scheduler, true_cards, sys_cards, card_logs, current_date, review_limit)
+
+            simulate_day(
+                nature_scheduler,
+                algo_scheduler,
+                true_cards,
+                sys_cards,
+                card_logs,
+                current_date,
+                review_limit,
+            )
             current_date += timedelta(days=1)
 
     # End of simulation
     all_logs = [log for logs in card_logs.values() for log in logs]
-    
+
     if verbose:
         print(f"Simulation complete. {len(all_logs)} reviews generated.")
-    
+
     # Calculate memorized over time using TRUE cards (Nature)
     total_retrievability = 0.0
     end_date = current_date
     log_prob_sum = 0.0
-    
+
     for card in true_cards.values():
         r = nature_scheduler.get_card_retrievability(card, end_date)
         total_retrievability += r
         if r > 0:
             log_prob_sum += math.log(r)
         else:
-            log_prob_sum = -float('inf') 
-            
+            log_prob_sum = -float("inf")
+
     if verbose:
         print(f"Total cards: {len(true_cards)}")
         print(f"Total Retention (Sum of R): {total_retrievability:.4f}")
         print(f"Joint Retention Probability (Product of R): exp({log_prob_sum:.4f})")
-    
+
     # Fit FSRS parameters
     if verbose:
         print("Fitting final parameters...")
-    
+
     fitted_params = None
     try:
         if len(all_logs) < 512:
             if verbose:
                 print("Warning: Not enough review logs.")
-        
+
         optimizer = Optimizer(all_logs)
         fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
-        
+
         if verbose:
             print("\nFinal Fitted Parameters:")
             print(fitted_params)
-            
+
             print("\nGround Truth Parameters:")
             print(list(ground_truth_params))
-            
+
             # Compare
-            mse = sum((f - g) ** 2 for f, g in zip(fitted_params, ground_truth_params)) / len(fitted_params)
+            mse = sum(
+                (f - g) ** 2
+                for f, g in zip(fitted_params, ground_truth_params, strict=False)
+            ) / len(fitted_params)
             print(f"MSE between fitted and ground truth: {mse:.8f}")
-            
+
     except Exception as e:
         print(f"Error during optimization: {e}")
         if verbose:
             traceback.print_exc()
-            
-    return fitted_params, ground_truth_params, {
-        "total_retention": total_retrievability,
-        "log_prob_sum": log_prob_sum,
-        "review_count": len(all_logs),
-        "card_count": len(true_cards)
-    }
+
+    return (
+        fitted_params,
+        ground_truth_params,
+        {
+            "total_retention": total_retrievability,
+            "log_prob_sum": log_prob_sum,
+            "review_count": len(all_logs),
+            "card_count": len(true_cards),
+        },
+    )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run FSRS Simulation")
-    parser.add_argument("--days", type=int, default=365, help="Number of days to simulate")
+    parser.add_argument(
+        "--days", type=int, default=365, help="Number of days to simulate"
+    )
     parser.add_argument("--reviews", type=int, default=200, help="Daily review limit")
-    parser.add_argument("--retention", type=float, default=0.9, help="Desired retention")
+    parser.add_argument(
+        "--retention", type=float, default=0.9, help="Desired retention"
+    )
     parser.add_argument("--burn-in", type=int, default=0, help="Burn-in days")
-    
+
     args = parser.parse_args()
-    
-    run_simulation(n_days=args.days, review_limit=args.reviews, desired_retention=args.retention, burn_in_days=args.burn_in)
+
+    run_simulation(
+        n_days=args.days,
+        review_limit=args.reviews,
+        desired_retention=args.retention,
+        burn_in_days=args.burn_in,
+    )

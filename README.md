@@ -9,12 +9,11 @@ A simulator and analysis toolset for studying how fitted FSRS parameters diverge
 
 ## Requirements
 
-- Python 3.10+
-- PyTorch
-- Matplotlib
-- Pandas
-- Tqdm
-- FSRS (`py-fsrs`)
+Python 3.10+ and dependencies in `pyproject.toml`:
+
+```bash
+pip install .
+```
 
 ## Usage
 
@@ -36,3 +35,22 @@ Compare multiple configurations (different day limits, burn-in periods, or reten
 python3 plot_fsrs_divergence.py --days 100 200 --burn-ins 0 30 --retention-schedules "5:0.7,1:0.9"
 ```
 The resulting graph is saved as `forgetting_curve_divergence.png`.
+
+## Development
+
+This project uses `ruff` for linting and formatting, and `mypy` for type checking. Configuration for these tools can be found in `pyproject.toml`.
+
+### Pre-commit Hooks
+
+To ensure code quality, pre-commit hooks are configured. To set them up, run:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+You can run the hooks manually on all files with:
+
+```bash
+pre-commit run --all-files
+```
