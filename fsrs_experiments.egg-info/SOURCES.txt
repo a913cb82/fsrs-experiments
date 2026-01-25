@@ -1,9 +1,0 @@
-README.md
-plot_fsrs_divergence.py
-pyproject.toml
-simulate_fsrs.py
-fsrs_experiments.egg-info/PKG-INFO
-fsrs_experiments.egg-info/SOURCES.txt
-fsrs_experiments.egg-info/dependency_links.txt
-fsrs_experiments.egg-info/requires.txt
-fsrs_experiments.egg-info/top_level.txt

@@ -15,7 +15,7 @@ ENV/
 # Build artifacts
 build/
 dist/
-*.egg-info/
+*.egg-info
 
 # Project specific
 forgetting_curve_divergence.png
