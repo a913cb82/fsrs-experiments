@@ -184,15 +184,78 @@ def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
     return res, pos
 
 
-def get_deck_config_id(blob: bytes) -> int | None:
-    """Extracts config_id (field 1) from Anki's DeckCommon BLOB."""
-    if not blob or len(blob) == 0 or blob[0] != 0x08:
+def get_field_from_proto(blob: bytes, field_no: int) -> int | None:
+    """Extracts a varint field from a Protobuf blob."""
+    if not blob:
         return None
-    try:
-        cid, _ = decode_varint(blob, 1)
+    pos = 0
+    while pos < len(blob):
+        try:
+            tag, pos = decode_varint(blob, pos)
+            f_num = tag >> 3
+            w_type = tag & 0x07
+            if f_num == field_no and w_type == 0:
+                val, pos = decode_varint(blob, pos)
+                return val
+            # Skip field
+            if w_type == 0:
+                _, pos = decode_varint(blob, pos)
+            elif w_type == 1:
+                pos += 8
+            elif w_type == 2:
+                length, pos = decode_varint(blob, pos)
+                pos += length
+            elif w_type == 5:
+                pos += 4
+            else:
+                break
+        except Exception:
+            break
+    return None
+
+
+def get_deck_config_id(common_blob: bytes, kind_blob: bytes) -> int:
+    """
+    Extracts config_id from Anki's DeckCommon or NormalDeck blobs.
+    Defaults to 1 if not found.
+    """
+    # 1. Try NormalDeck.config_id (field 1 of sub-message in field 1 of kind blob)
+    # kind_blob -> DeckKindProto.normal (field 1, length delimited) -> NormalDeck
+    if kind_blob:
+        pos = 0
+        while pos < len(kind_blob):
+            try:
+                tag, pos = decode_varint(kind_blob, pos)
+                f_num = tag >> 3
+                w_type = tag & 0x07
+                if f_num == 1 and w_type == 2:  # normal field
+                    length, pos = decode_varint(kind_blob, pos)
+                    normal_deck_blob = kind_blob[pos : pos + length]
+                    cid = get_field_from_proto(normal_deck_blob, 1)
+                    if cid is not None:
+                        return cid
+                    break
+                # Skip other fields in kind
+                if w_type == 0:
+                    _, pos = decode_varint(kind_blob, pos)
+                elif w_type == 1:
+                    pos += 8
+                elif w_type == 2:
+                    length, pos = decode_varint(kind_blob, pos)
+                    pos += length
+                elif w_type == 5:
+                    pos += 4
+                else:
+                    break
+            except Exception:
+                break
+
+    # 2. Try DeckCommon.config_id (field 1 of common blob)
+    cid = get_field_from_proto(common_blob, 1)
+    if cid is not None:
         return cid
-    except Exception:
-        return None
+
+    return 1
 
 
 def load_anki_history(
@@ -224,7 +287,7 @@ def load_anki_history(
 
         if ver >= 18:
             # New relational schema (Anki 23.10+)
-            cur.execute("SELECT id, name, common FROM decks")
+            cur.execute("SELECT id, name, common, kind FROM decks")
             decks = cur.fetchall()
 
             cur.execute("SELECT id, name FROM deck_config")
@@ -236,24 +299,40 @@ def load_anki_history(
             for row in decks:
                 if row[0] is None or row[1] is None:
                     continue
-                d_id, d_name, d_blob_raw = int(row[0]), str(row[1]), row[2]
-                d_blob = bytes(d_blob_raw) if d_blob_raw is not None else b""
-                c_id = get_deck_config_id(d_blob)
-                if c_id is None:
+                d_id, d_name, d_common_raw, d_kind_raw = (
+                    int(row[0]),
+                    str(row[1]),
+                    row[2],
+                    row[3],
+                )
+                d_common = bytes(d_common_raw) if d_common_raw is not None else b""
+                d_kind = bytes(d_kind_raw) if d_kind_raw is not None else b""
+
+                # Check explicitly set config_id
+                cid = None
+                # NormalDeck.config_id has priority in modern Anki for
+                # Normal decks. However, Filtered decks don't have it.
+                # We'll use our helper which handles both.
+                cid_found = get_deck_config_id(d_common, d_kind)
+
+                # Inheritance logic: If it's the default config (1), it MIGHT
+                # be inheriting from a parent if it's a subdeck.
+                # Actually, in Anki, if a subdeck is created, it defaults to 1
+                # unless changed. If it's 1, we check if any parent has a
+                # non-1 config.
+                if cid_found == 1:
                     parts = d_name.split("::")
                     for i in range(len(parts) - 1, 0, -1):
                         p_name = "::".join(parts[:i])
                         if p_name in d_name_map:
                             p_row = d_name_map[p_name]
-                            p_blob_raw = p_row[2]
-                            if p_blob_raw is not None:
-                                p_blob = bytes(p_blob_raw)
-                                c_id = get_deck_config_id(p_blob)
-                                if c_id is not None:
-                                    break
-                if c_id is None:
-                    c_id = 1
-                deck_to_config[d_id] = c_id
+                            p_common = bytes(p_row[2]) if p_row[2] is not None else b""
+                            p_kind = bytes(p_row[3]) if p_row[3] is not None else b""
+                            p_cid = get_deck_config_id(p_common, p_kind)
+                            if p_cid != 1:
+                                cid_found = p_cid
+                                break
+                deck_to_config[d_id] = cid_found
 
             # Filter logic
             target_cid = None
@@ -356,7 +435,8 @@ def load_anki_history(
     first_review_time = None
     last_review_time = START_DATE
 
-    for cid, ease, rev_id, _rev_type in rows:
+    for cid_v, ease, rev_id, _rev_type in rows:
+        cid = int(cid_v)
         dt = datetime.fromtimestamp(rev_id / 1000.0, tz=timezone.utc)
         log = ReviewLog(
             card_id=cid,

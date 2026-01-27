@@ -86,11 +86,18 @@ def test_relational_inheritance(tmp_path: Any) -> None:
     cur.execute("CREATE TABLE col (id integer primary key, ver integer)")
     cur.execute("INSERT INTO col (id, ver) VALUES (1, 18)")
 
-    cur.execute("CREATE TABLE decks (id integer primary key, name text, common blob)")
-    # Parent has config 100
-    cur.execute("INSERT INTO decks (id, name, common) VALUES (1, 'Parent', x'0864')")
+    cur.execute(
+        "CREATE TABLE decks (id integer primary key, name text, common blob, kind blob)"
+    )
+    # Parent has config 100 in common blob (field 1)
+    cur.execute(
+        "INSERT INTO decks (id, name, common, kind) VALUES (1, 'Parent', x'0864', x'')"
+    )
     # Child has NO config (should inherit from Parent)
-    cur.execute("INSERT INTO decks (id, name, common) VALUES (2, 'Parent::Child', x'')")
+    cur.execute(
+        "INSERT INTO decks (id, name, common, kind) "
+        "VALUES (2, 'Parent::Child', x'', x'')"
+    )
 
     cur.execute("CREATE TABLE deck_config (id integer primary key, name text)")
     cur.execute("INSERT INTO deck_config (id, name) VALUES (100, 'InheritedConfig')")
@@ -121,8 +128,13 @@ def test_load_anki_history_warnings(tmp_path: Any) -> None:
     cur.execute("CREATE TABLE col (id integer primary key, ver integer)")
     cur.execute("INSERT INTO col (id, ver) VALUES (1, 18)")
 
-    cur.execute("CREATE TABLE decks (id integer primary key, name text, common blob)")
-    cur.execute("INSERT INTO decks (id, name, common) VALUES (1, 'TestDeck', x'0801')")
+    cur.execute(
+        "CREATE TABLE decks (id integer primary key, name text, common blob, kind blob)"
+    )
+    cur.execute(
+        "INSERT INTO decks (id, name, common, kind) "
+        "VALUES (1, 'TestDeck', x'0801', x'')"
+    )
 
     cur.execute("CREATE TABLE deck_config (id integer primary key, name text)")
     cur.execute("INSERT INTO deck_config (id, name) VALUES (1, 'Default')")

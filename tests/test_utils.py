@@ -23,14 +23,19 @@ def test_decode_varint() -> None:
 
 
 def test_get_deck_config_id() -> None:
-    # Tag 0x08 (field 1)
-    assert get_deck_config_id(b"\x08\x01") == 1
-    assert get_deck_config_id(b"\x08\xac\x02") == 300
-    # No tag 0x08 at start
-    assert get_deck_config_id(b"\x10\x01") is None
-    # Empty or short
-    assert get_deck_config_id(b"") is None
-    assert get_deck_config_id(b"\x08") is None
+    # 1. From common_blob (field 1)
+    assert get_deck_config_id(b"\x08\x01", b"") == 1
+    assert get_deck_config_id(b"\x08\xac\x02", b"") == 300
+
+    # 2. From kind_blob (field 1 -> field 1)
+    # 0a 0d 08 fa e3 9c eb d1 32 ... (NormalDeck wrapping config_id)
+    # 0a: tag 1, type 2. 0d: length 13. 08: tag 1, type 0.
+    kind_with_cid = b"\x0a\x0d\x08\xfa\xe3\x9c\xeb\xd1\x32\x10\x01\x18\x0b\x30\x02"
+    assert get_deck_config_id(b"", kind_with_cid) == 1739955057146
+
+    # 3. Default to 1
+    assert get_deck_config_id(b"", b"") == 1
+    assert get_deck_config_id(b"\x10\x01", b"\x10\x01") == 1
 
 
 def test_parse_retention_schedule() -> None:
