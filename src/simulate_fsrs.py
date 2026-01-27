@@ -124,14 +124,6 @@ class RustOptimizer:
         if not HAS_RUST_OPTIMIZER:
             raise ImportError("fsrs-rs-python not installed.")
 
-        # Convert ReviewLog objects to Rust-compatible FSRSItem objects.
-        # We only process logs that aren't already covered by pre_constructed_items.
-        # For simplicity in this optimized version, if we have
-        # pre_constructed_items we assume they represent the static history
-        # and review_logs represent the NEW reviews.
-        # However, Anki optimization usually requires the FULL history per card.
-        # So we'll maintain the snapshots logic but allow passing them in.
-
         items_map: dict[int, list[ReviewLog]] = defaultdict(list)
         for log in self.review_logs:
             items_map[log.card_id].append(log)
@@ -210,6 +202,7 @@ def load_anki_history(
 ) -> tuple[dict[int, list[ReviewLog]], datetime]:
     """
     Extracts FSRS-compatible review logs from an Anki collection.anki2 file.
+    Supports both old (JSON-in-col) and new (relational tables) schemas.
     """
     if not os.path.exists(path):
         tqdm.write(f"Error: Anki database not found at {path}")
@@ -223,6 +216,7 @@ def load_anki_history(
         cur.execute("SELECT ver FROM col")
         v_row = cur.fetchone()
         ver = int(v_row[0]) if v_row and v_row[0] is not None else 0
+        tqdm.write(f"Anki database version {ver} detected.")
 
         valid_deck_ids: list[int] = []
 
@@ -230,9 +224,11 @@ def load_anki_history(
             # New relational schema (Anki 23.10+)
             cur.execute("SELECT id, name, common FROM decks")
             decks = cur.fetchall()
+            tqdm.write(f"Found {len(decks)} decks in database.")
 
             cur.execute("SELECT id, name FROM deck_config")
             configs = {str(row[1]): int(row[0]) for row in cur.fetchall()}
+            tqdm.write(f"Found {len(configs)} deck configurations.")
 
             if deck_config_name and deck_config_name not in configs:
                 avail = ", ".join(configs.keys())
@@ -280,6 +276,12 @@ def load_anki_history(
                         continue
                 valid_deck_ids.append(d_id)
 
+            if deck_config_name:
+                tqdm.write(
+                    f"Matched {len(valid_deck_ids)} decks using "
+                    f"config '{deck_config_name}'."
+                )
+
             if deck_name and not valid_deck_ids:
                 avail_decks = ", ".join(str(d[1]) for d in decks)
                 tqdm.write(f"Warning: Deck '{deck_name}' not found.")
@@ -293,6 +295,10 @@ def load_anki_history(
 
             decks_json = json.loads(col_row[0]) if col_row[0] else {}
             dconf_json = json.loads(col_row[1]) if col_row[1] else {}
+            tqdm.write(
+                f"Found {len(decks_json)} decks and {len(dconf_json)} "
+                "configs in JSON col table."
+            )
 
             target_conf_id = None
             if deck_config_name:
@@ -315,9 +321,17 @@ def load_anki_history(
                 if target_conf_id is None or deck.get("conf") == target_conf_id:
                     valid_deck_ids.append(int(did_s))
 
+            if deck_config_name:
+                tqdm.write(
+                    f"Matched {len(valid_deck_ids)} decks using "
+                    f"config '{deck_config_name}'."
+                )
+
         if not valid_deck_ids:
+            tqdm.write("No matching decks found for filtering criteria.")
             return {}, START_DATE
 
+        tqdm.write(f"Querying reviews for {len(valid_deck_ids)} decks...")
         placeholders = ",".join(["?"] * len(valid_deck_ids))
         query = f"""
             SELECT r.cid, r.ease, r.id, r.type
@@ -336,6 +350,7 @@ def load_anki_history(
         conn.close()
 
     card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
+    first_review_time = None
     last_review_time = START_DATE
 
     for cid, ease, rev_id, _rev_type in rows:
@@ -347,11 +362,19 @@ def load_anki_history(
             review_duration=None,
         )
         card_logs[cid].append(log)
+        if first_review_time is None or dt < first_review_time:
+            first_review_time = dt
         if dt > last_review_time:
             last_review_time = dt
 
-    total_revs = sum(len(logs) for logs in card_logs.values())
+    total_revs = len(rows)
     tqdm.write(f"Successfully loaded {total_revs} reviews for {len(card_logs)} cards.")
+    if first_review_time is not None:
+        tqdm.write(
+            f"Review date range: {first_review_time.date()} to "
+            f"{last_review_time.date()}"
+        )
+
     return card_logs, last_review_time
 
 
@@ -366,7 +389,6 @@ def simulate_day(
     weights: dict[str, list[float]] | None = None,
 ) -> None:
     # Use NumPy for fast due-check across the deck
-    # This replaces the O(N) Python loop scanner
     dues = np.array([c.due for c in sys_cards])
     due_mask = dues <= current_date
     due_indices = np.where(due_mask)[0].tolist()
@@ -537,17 +559,12 @@ def run_simulation(
         review_weights = None
 
         if seeded_data:
-            # Use pre-calculated data
             current_date = seeded_data["last_rev"] + timedelta(days=1)
-            # We must deepcopy card objects because they are
-            # modified in-place during simulation.
-            # However, we convert the dict values to a list for O(1) NumPy access.
             true_cards = list(deepcopy(seeded_data["true_cards"]).values())
             sys_cards = list(deepcopy(seeded_data["sys_cards"]).values())
             card_logs = deepcopy(seeded_data["logs"])
             review_weights = seeded_data.get("weights")
         elif seed_history:
-            # Fallback to loading from disk (e.g. single simulation run)
             logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
             review_weights = infer_review_weights(logs)
@@ -594,7 +611,6 @@ def run_simulation(
                     parameters=tuple(fitted_bi),
                     desired_retention=algo_scheduler.desired_retention,
                 )
-                # Reschedule with new params
                 for i, card in enumerate(sys_cards):
                     sys_cards[i] = algo_scheduler.reschedule_card(
                         Card(card_id=card.card_id), card_logs[card.card_id]
@@ -675,7 +691,6 @@ def run_simulation_cli() -> None:
     args = parser.parse_args()
     gt_params = parse_parameters(args.ground_truth) if args.ground_truth else None
 
-    # Handle pre-fitting if history is provided
     initial_params = None
     if args.seed_history:
         logs, _ = load_anki_history(args.seed_history, args.deck_config, args.deck_name)
