@@ -24,7 +24,7 @@ pip install -e .
 For a guided analysis of different target retentions and durations, use the provided Jupyter notebook:
 
 ```bash
-jupyter notebook Divergence_Exploration.ipynb
+jupyter notebook notebooks/Divergence_Exploration.ipynb
 ```
 
 ### Plotting Divergence
