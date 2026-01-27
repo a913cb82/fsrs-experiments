@@ -219,29 +219,20 @@ def load_anki_history(
         tqdm.write(f"Anki database version {ver} detected.")
 
         valid_deck_ids: list[int] = []
+        config_id_to_name: dict[int, str] = {}
+        deck_to_config: dict[int, int] = {}
 
         if ver >= 18:
             # New relational schema (Anki 23.10+)
             cur.execute("SELECT id, name, common FROM decks")
             decks = cur.fetchall()
-            tqdm.write(f"Found {len(decks)} decks in database.")
 
             cur.execute("SELECT id, name FROM deck_config")
-            configs = {str(row[1]): int(row[0]) for row in cur.fetchall()}
-            tqdm.write(f"Found {len(configs)} deck configurations.")
-
-            if deck_config_name and deck_config_name not in configs:
-                avail = ", ".join(configs.keys())
-                tqdm.write(f"Warning: Config '{deck_config_name}' not found.")
-                tqdm.write(f"Available configs: {avail}")
-                return {}, START_DATE
-
-            t_cid = configs.get(str(deck_config_name)) if deck_config_name else None
+            config_id_to_name = {int(row[0]): str(row[1]) for row in cur.fetchall()}
 
             # Map deck names to their rows for inheritance lookup
             d_name_map = {str(row[1]): row for row in decks}
 
-            res_d_configs: dict[int, int] = {}
             for row in decks:
                 if row[0] is None or row[1] is None:
                     continue
@@ -262,30 +253,27 @@ def load_anki_history(
                                     break
                 if c_id is None:
                     c_id = 1
-                res_d_configs[d_id] = c_id
+                deck_to_config[d_id] = c_id
 
-            # Filter decks
+            # Filter logic
+            target_cid = None
+            if deck_config_name:
+                for cid, name in config_id_to_name.items():
+                    if name == deck_config_name:
+                        target_cid = cid
+                        break
+
             for row in decks:
                 if row[0] is None or row[1] is None:
                     continue
                 d_id, d_name = int(row[0]), str(row[1])
                 if deck_name and d_name != deck_name:
                     continue
-                if t_cid is not None:
-                    if d_id not in res_d_configs or res_d_configs[d_id] != t_cid:
+                if deck_config_name:
+                    if target_cid is None or deck_to_config.get(d_id) != target_cid:
                         continue
                 valid_deck_ids.append(d_id)
 
-            if deck_config_name:
-                tqdm.write(
-                    f"Matched {len(valid_deck_ids)} decks using "
-                    f"config '{deck_config_name}'."
-                )
-
-            if deck_name and not valid_deck_ids:
-                avail_decks = ", ".join(str(d[1]) for d in decks)
-                tqdm.write(f"Warning: Deck '{deck_name}' not found.")
-                tqdm.write(f"Available decks: {avail_decks}")
         else:
             # Old JSON schema (pre-23.10)
             cur.execute("SELECT decks, dconf FROM col")
@@ -295,44 +283,59 @@ def load_anki_history(
 
             decks_json = json.loads(col_row[0]) if col_row[0] else {}
             dconf_json = json.loads(col_row[1]) if col_row[1] else {}
-            tqdm.write(
-                f"Found {len(decks_json)} decks and {len(dconf_json)} "
-                "configs in JSON col table."
-            )
 
-            target_conf_id = None
+            for cid_s, cfg in dconf_json.items():
+                config_id_to_name[int(cid_s)] = str(cfg.get("name", "Unknown"))
+
+            target_cid = None
             if deck_config_name:
-                for cid_s, cfg in dconf_json.items():
-                    if cfg.get("name") == deck_config_name:
-                        target_conf_id = int(cid_s)
+                for cid, name in config_id_to_name.items():
+                    if name == deck_config_name:
+                        target_cid = cid
                         break
-                if target_conf_id is None:
-                    avail_cfg = [
-                        str(c.get("name")) for c in dconf_json.values() if c.get("name")
-                    ]
-                    tqdm.write(
-                        f"Warning: Config '{deck_config_name}' not found. "
-                        f"Available: {', '.join(avail_cfg)}"
-                    )
 
             for did_s, deck in decks_json.items():
-                if deck_name and deck.get("name") != deck_name:
-                    continue
-                if target_conf_id is None or deck.get("conf") == target_conf_id:
-                    valid_deck_ids.append(int(did_s))
+                did = int(did_s)
+                cid = int(deck.get("conf", 1))
+                deck_to_config[did] = cid
 
-            if deck_config_name:
-                tqdm.write(
-                    f"Matched {len(valid_deck_ids)} decks using "
-                    f"config '{deck_config_name}'."
-                )
+                d_name = str(deck.get("name", ""))
+                if deck_name and d_name != deck_name:
+                    continue
+                if deck_config_name:
+                    if target_cid is None or cid != target_cid:
+                        continue
+                valid_deck_ids.append(did)
+
+        # Informative error if deck_config_name filter matched nothing
+        if deck_config_name and not valid_deck_ids:
+            # Calculate card counts per config for informative error
+            cur.execute("SELECT did, count(*) FROM cards GROUP BY did")
+            cards_per_deck = {int(r[0]): int(r[1]) for r in cur.fetchall()}
+
+            cards_per_config: dict[str, int] = defaultdict(int)
+            for did, cid in deck_to_config.items():
+                cname = config_id_to_name.get(cid, f"ID {cid}")
+                cards_per_config[cname] += cards_per_deck.get(did, 0)
+
+            stats_list = [
+                f"  - {name}: {count} cards"
+                for name, count in sorted(cards_per_config.items())
+            ]
+            stats_str = "\n".join(stats_list)
+            error_msg = (
+                f"Error: Deck configuration '{deck_config_name}' matched 0 cards.\n"
+                f"Available configurations and card counts:\n{stats_str}"
+            )
+            tqdm.write(error_msg)
+            sys.exit(1)
 
         if not valid_deck_ids:
-            tqdm.write("No matching decks found for filtering criteria.")
+            tqdm.write("Warning: No matching decks found for filtering criteria.")
             return {}, START_DATE
 
-        tqdm.write(f"Querying reviews for {len(valid_deck_ids)} decks...")
-        placeholders = ",".join(["?"] * len(valid_deck_ids))
+        tqdm.write(f"Querying reviews for {len(valid_deck_ids)} matching decks...")
+        placeholders = ",".join(["?" for _ in valid_deck_ids])
         query = f"""
             SELECT r.cid, r.ease, r.id, r.type
             FROM revlog r

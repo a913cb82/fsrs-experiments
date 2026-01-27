@@ -3,6 +3,8 @@ import sqlite3
 from datetime import datetime
 from typing import Any
 
+import pytest
+
 from src.simulate_fsrs import load_anki_history
 
 TEST_DB = "tests/test_collection.anki2"
@@ -125,12 +127,26 @@ def test_load_anki_history_warnings(tmp_path: Any) -> None:
     cur.execute("CREATE TABLE deck_config (id integer primary key, name text)")
     cur.execute("INSERT INTO deck_config (id, name) VALUES (1, 'Default')")
 
+    # MUST create cards table for informative error logic
+    cur.execute("CREATE TABLE cards (id integer primary key, did integer)")
+    cur.execute("INSERT INTO cards (id, did) VALUES (1, 1)")
+
+    # MUST create revlog table for other branches
+    sql_rev = (
+        "CREATE TABLE revlog (id integer primary key, cid integer, "
+        "ease integer, type integer)"
+    )
+    cur.execute(sql_rev)
+
     conn.commit()
     conn.close()
 
-    logs, _ = load_anki_history(db_path, deck_config_name="NonExistentConfig")
-    assert logs == {}
+    # Trigger config not found error (SystemExit)
+    with pytest.raises(SystemExit) as cm:
+        load_anki_history(db_path, deck_config_name="NonExistentConfig")
+    assert cm.value.code == 1
 
+    # Trigger deck not found warning (should still return empty logs, but it warns)
     logs, _ = load_anki_history(db_path, deck_name="NonExistentDeck")
     assert logs == {}
 
