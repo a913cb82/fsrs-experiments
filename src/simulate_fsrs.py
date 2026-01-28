@@ -535,6 +535,7 @@ def simulate_day(
     card_logs: dict[int, list[ReviewLog]],
     current_date: datetime,
     review_limit: int,
+    new_limit: int,
     weights: dict[str, list[float]] | None = None,
     time_limit: float | None = None,
     time_estimator: Any | None = None,
@@ -548,6 +549,7 @@ def simulate_day(
     due_indices = sorted(due_indices)
     random.shuffle(due_indices)
     reviews_done = 0
+    new_done = 0
     time_accumulated = 0.0
 
     # Get weights or use defaults
@@ -619,6 +621,8 @@ def simulate_day(
                 break
         elif reviews_done >= review_limit:
             break
+        elif new_done >= new_limit:
+            break
 
         base_card = Card()
         true_card = deepcopy(base_card)
@@ -647,6 +651,7 @@ def simulate_day(
         sys_cards.append(updated_sys_card)
         card_logs[updated_sys_card.card_id].append(log)
         reviews_done += 1
+        new_done += 1
 
 
 def parse_retention_schedule(
@@ -691,6 +696,7 @@ def run_simulation(
     n_days: int = 365,
     burn_in_days: int = 0,
     review_limit: int = 200,
+    new_limit: int = 10,
     retention: str = "0.9",
     verbose: bool = True,
     seed: int = 42,
@@ -780,6 +786,7 @@ def run_simulation(
                 card_logs,
                 current_date,
                 review_limit,
+                new_limit,
                 weights=review_weights,
                 time_limit=time_limit,
                 time_estimator=time_estimator,
@@ -822,6 +829,7 @@ def run_simulation(
                     card_logs,
                     current_date,
                     review_limit,
+                    new_limit,
                     weights=review_weights,
                     time_limit=time_limit,
                     time_estimator=time_estimator,

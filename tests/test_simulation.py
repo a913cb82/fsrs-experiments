@@ -82,7 +82,7 @@ def test_run_simulation_with_burn_in() -> None:
 def test_run_simulation_with_burn_in_triggered() -> None:
     # We need 512 reviews to trigger optimizer
     fitted, _, metrics = run_simulation(
-        n_days=10, burn_in_days=5, review_limit=150, verbose=False
+        n_days=10, burn_in_days=5, review_limit=150, new_limit=150, verbose=False
     )
     assert fitted is not None
     assert metrics["review_count"] >= 512
