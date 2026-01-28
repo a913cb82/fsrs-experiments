@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import random
 import sqlite3
@@ -54,7 +55,21 @@ __all__ = [
     "DEFAULT_PARAMETERS",
     "infer_review_weights",
     "get_review_history_stats",
+    "calculate_expected_d0",
 ]
+
+
+def calculate_expected_d0(weights: list[float], parameters: tuple[float, ...]) -> float:
+    """
+    Calculates expected initial difficulty E[D0(G)] based on first-rating
+    distribution and FSRS v6 parameters w4, w5.
+    Formula: D0(G) = w4 - exp(w5*(G-1)) + 1
+    """
+    w4 = parameters[4]
+    w5 = parameters[5]
+    # G values: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
+    d0_vals = [w4 - math.exp(w5 * (g - 1)) + 1 for g in [1, 2, 3, 4]]
+    return sum(p * d for p, d in zip(weights, d0_vals, strict=False))
 
 
 def infer_review_weights(
@@ -458,9 +473,16 @@ def get_review_history_stats(
     """
     Replays review history using provided parameters and returns a list of
     stats for each review (retention, rating, duration, etc).
-    Only includes reviews where delta_t > 0 (subsequent reviews).
+    Includes first reviews (new cards) with stability 0.0 and expected D0.
     """
     scheduler = Scheduler(parameters=parameters)
+
+    # Inferred features for new cards
+    weights_inf = infer_review_weights(card_logs)
+    w_first = weights_inf["first"]
+    prob_first_success = 1.0 - w_first[0]
+    expected_d0 = calculate_expected_d0(w_first, parameters)
+
     stats = []
 
     for cid, logs in card_logs.items():
@@ -472,24 +494,32 @@ def get_review_history_stats(
         card = Card(card_id=cid)
         # Replay history
         for i, log in enumerate(sorted_logs):
-            if i > 0:
-                retrievability = scheduler.get_card_retrievability(
-                    card, log.review_datetime
-                )
-                stats.append(
-                    {
-                        "card_id": cid,
-                        "retention": retrievability,
-                        "rating": int(log.rating),
-                        "duration": log.review_duration,
-                        "stability": card.stability,
-                        "difficulty": card.difficulty,
-                        "elapsed_days": (
-                            log.review_datetime - card.last_review
-                        ).total_seconds()
-                        / 86400.0,
-                    }
-                )
+            if i == 0:
+                # Features for a BRAND NEW card
+                ret = prob_first_success
+                stab = 0.0
+                diff = expected_d0
+                elapsed = 0.0
+            else:
+                # Retention at the time of THIS review
+                ret = scheduler.get_card_retrievability(card, log.review_datetime)
+                stab = card.stability
+                diff = card.difficulty
+                elapsed = (
+                    log.review_datetime - card.last_review
+                ).total_seconds() / 86400.0
+
+            stats.append(
+                {
+                    "card_id": cid,
+                    "retention": ret,
+                    "rating": int(log.rating),
+                    "duration": log.review_duration,
+                    "stability": stab,
+                    "difficulty": diff,
+                    "elapsed_days": elapsed,
+                }
+            )
 
             # Update card state for the NEXT review
             card, _ = scheduler.review_card(card, log.rating, log.review_datetime)
@@ -514,6 +544,8 @@ def simulate_day(
     due_mask = dues <= current_date
     due_indices = np.where(due_mask)[0].tolist()
 
+    # Sort indices to keep deterministic if needed (NumPy where is stable)
+    due_indices = sorted(due_indices)
     random.shuffle(due_indices)
     reviews_done = 0
     time_accumulated = 0.0
@@ -561,8 +593,8 @@ def simulate_day(
 
         # Estimate time if estimator is provided
         if time_estimator is not None:
-            # Estimator can take (card, rating)
-            review_time = time_estimator(sys_card, rating)
+            # Estimator can take (card, rating, current_date)
+            review_time = time_estimator(sys_card, rating, current_date)
             if time_limit is not None and time_accumulated + review_time > time_limit:
                 break
             time_accumulated += review_time
@@ -599,7 +631,7 @@ def simulate_day(
 
         # Estimate time for new card
         if time_estimator is not None:
-            review_time = time_estimator(sys_card, rating)
+            review_time = time_estimator(sys_card, rating, current_date)
             if time_limit is not None and time_accumulated + review_time > time_limit:
                 break
             time_accumulated += review_time

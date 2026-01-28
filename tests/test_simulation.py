@@ -217,13 +217,19 @@ def test_get_review_history_stats() -> None:
 
     stats = get_review_history_stats(logs, DEFAULT_PARAMETERS)
 
-    # Should have 1 stat (the 2nd review)
-    assert len(stats) == 1
-    s = stats[0]
-    assert s["card_id"] == 1
-    assert s["rating"] == 3
-    assert s["duration"] == 10000
-    assert 0.0 <= s["retention"] <= 1.0
-    assert s["elapsed_days"] == 5.0
-    assert s["stability"] > 0
-    assert s["difficulty"] > 0
+    # Should have 2 stats (both reviews)
+    assert len(stats) == 2
+    s1 = stats[0]
+    assert s1["card_id"] == 1
+    assert s1["rating"] == 3
+    assert s1["stability"] == 0.0
+    assert s1["elapsed_days"] == 0.0
+
+    s2 = stats[1]
+    assert s2["card_id"] == 1
+    assert s2["rating"] == 3
+    assert s2["duration"] == 10000
+    assert 0.0 <= s2["retention"] <= 1.0
+    assert s2["elapsed_days"] == 5.0
+    assert s2["stability"] > 0
+    assert s2["difficulty"] > 0
