@@ -506,6 +506,8 @@ def simulate_day(
     current_date: datetime,
     review_limit: int,
     weights: dict[str, list[float]] | None = None,
+    time_limit: float | None = None,
+    time_estimator: Any | None = None,
 ) -> None:
     # Use NumPy for fast due-check across the deck
     dues = np.array([c.due for c in sys_cards])
@@ -514,6 +516,7 @@ def simulate_day(
 
     random.shuffle(due_indices)
     reviews_done = 0
+    time_accumulated = 0.0
 
     # Get weights or use defaults
     w_success = (
@@ -533,7 +536,11 @@ def simulate_day(
     )
 
     for idx in due_indices:
-        if reviews_done >= review_limit:
+        # Check limits
+        if time_limit is not None:
+            if time_accumulated >= time_limit:
+                break
+        elif reviews_done >= review_limit:
             break
 
         sys_card = sys_cards[idx]
@@ -552,6 +559,14 @@ def simulate_day(
         else:
             rating = Rating.Again
 
+        # Estimate time if estimator is provided
+        if time_estimator is not None:
+            # Estimator can take (card, rating)
+            review_time = time_estimator(sys_card, rating)
+            if time_limit is not None and time_accumulated + review_time > time_limit:
+                break
+            time_accumulated += review_time
+
         updated_true_card, _ = nature_scheduler.review_card(
             true_card, rating, current_date
         )
@@ -565,7 +580,14 @@ def simulate_day(
         card_logs[card_id].append(log)
         reviews_done += 1
 
-    while reviews_done < review_limit:
+    # New cards
+    while True:
+        if time_limit is not None:
+            if time_accumulated >= time_limit:
+                break
+        elif reviews_done >= review_limit:
+            break
+
         base_card = Card()
         true_card = deepcopy(base_card)
         sys_card = deepcopy(base_card)
@@ -574,6 +596,13 @@ def simulate_day(
             [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
             weights=w_first,
         )[0]
+
+        # Estimate time for new card
+        if time_estimator is not None:
+            review_time = time_estimator(sys_card, rating)
+            if time_limit is not None and time_accumulated + review_time > time_limit:
+                break
+            time_accumulated += review_time
 
         updated_true_card, _ = nature_scheduler.review_card(
             true_card, rating, current_date
@@ -640,6 +669,8 @@ def run_simulation(
     deck_name: str | None = None,
     initial_params: tuple[float, ...] | None = None,
     seeded_data: dict[str, Any] | None = None,
+    time_limit: float | None = None,
+    time_estimator: Any | None = None,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
@@ -718,6 +749,8 @@ def run_simulation(
                 current_date,
                 review_limit,
                 weights=review_weights,
+                time_limit=time_limit,
+                time_estimator=time_estimator,
             )
             current_date += timedelta(days=1)
 
@@ -758,6 +791,8 @@ def run_simulation(
                     current_date,
                     review_limit,
                     weights=review_weights,
+                    time_limit=time_limit,
+                    time_estimator=time_estimator,
                 )
                 current_date += timedelta(days=1)
 
@@ -771,11 +806,19 @@ def run_simulation(
             pass
 
         stabilities = []
+        total_retention = 0.0
         if fitted_params:
             final_algo_scheduler = Scheduler(parameters=tuple(fitted_params))
             for i in range(len(true_cards)):
                 card_id = true_cards[i].card_id
                 s_nat = true_cards[i].stability or 0.0
+
+                # Nature's actual retrievability at the end of simulation
+                r_nat = nature_scheduler.get_card_retrievability(
+                    true_cards[i], current_date
+                )
+                total_retention += r_nat
+
                 rescheduled = final_algo_scheduler.reschedule_card(
                     Card(card_id=card_id), card_logs[card_id]
                 )
@@ -789,6 +832,7 @@ def run_simulation(
                 "review_count": len(all_logs_final),
                 "card_count": len(true_cards),
                 "stabilities": stabilities,
+                "total_retention": total_retention,
             },
         )
     finally:
