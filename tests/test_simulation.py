@@ -190,3 +190,40 @@ def test_run_simulation_cli_with_history(monkeypatch: Any) -> None:
     )
 
     run_simulation_cli()
+
+
+def test_get_review_history_stats() -> None:
+    from src.simulate_fsrs import get_review_history_stats
+
+    now = datetime.now(timezone.utc)
+    # Card 1: 1st review now-10d, 2nd review now-5d
+    # 1st review is used to establish state, 2nd review is where we get stats
+    logs = {
+        1: [
+            ReviewLog(
+                card_id=1,
+                rating=Rating.Good,
+                review_datetime=now - timedelta(days=10),
+                review_duration=5000,
+            ),
+            ReviewLog(
+                card_id=1,
+                rating=Rating.Good,
+                review_datetime=now - timedelta(days=5),
+                review_duration=10000,
+            ),
+        ]
+    }
+
+    stats = get_review_history_stats(logs, DEFAULT_PARAMETERS)
+
+    # Should have 1 stat (the 2nd review)
+    assert len(stats) == 1
+    s = stats[0]
+    assert s["card_id"] == 1
+    assert s["rating"] == 3
+    assert s["duration"] == 10000
+    assert 0.0 <= s["retention"] <= 1.0
+    assert s["elapsed_days"] == 5.0
+    assert s["stability"] > 0
+    assert s["difficulty"] > 0

@@ -59,12 +59,13 @@ def test_load_old_json_schema(tmp_path: Any) -> None:
     cur.execute("CREATE TABLE cards (id integer primary key, did integer)")
     cur.execute("INSERT INTO cards (id, did) VALUES (10, 2)")
 
-    sql_rev = (
+    cur.execute(
         "CREATE TABLE revlog (id integer primary key, cid integer, "
-        "ease integer, type integer)"
+        "ease integer, type integer, time integer)"
     )
-    cur.execute(sql_rev)
-    cur.execute("INSERT INTO revlog (id, cid, ease, type) VALUES (1000000, 10, 3, 0)")
+    cur.execute(
+        "INSERT INTO revlog (id, cid, ease, type, time) VALUES (1000000, 10, 3, 0, 5000)"
+    )
 
     conn.commit()
     conn.close()
@@ -72,6 +73,7 @@ def test_load_old_json_schema(tmp_path: Any) -> None:
     logs, _ = load_anki_history(db_path, deck_config_name="OldConfig")
     assert len(logs) == 1
     assert 10 in logs
+    assert logs[10][0].review_duration == 5000
 
     logs, _ = load_anki_history(db_path, deck_name="OldDeck")
     assert len(logs) == 1
@@ -107,10 +109,12 @@ def test_relational_inheritance(tmp_path: Any) -> None:
 
     sql_rev = (
         "CREATE TABLE revlog (id integer primary key, cid integer, "
-        "ease integer, type integer)"
+        "ease integer, type integer, time integer)"
     )
     cur.execute(sql_rev)
-    cur.execute("INSERT INTO revlog (id, cid, ease, type) VALUES (1000000, 10, 3, 0)")
+    cur.execute(
+        "INSERT INTO revlog (id, cid, ease, type, time) VALUES (1000000, 10, 3, 0, 5000)"
+    )
 
     conn.commit()
     conn.close()
@@ -146,7 +150,7 @@ def test_load_anki_history_warnings(tmp_path: Any) -> None:
     # MUST create revlog table for other branches
     sql_rev = (
         "CREATE TABLE revlog (id integer primary key, cid integer, "
-        "ease integer, type integer)"
+        "ease integer, type integer, time integer)"
     )
     cur.execute(sql_rev)
 

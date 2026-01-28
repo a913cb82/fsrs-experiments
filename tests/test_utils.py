@@ -2,6 +2,7 @@ from src.simulate_fsrs import (
     DEFAULT_PARAMETERS,
     decode_varint,
     get_deck_config_id,
+    get_field_from_proto,
     get_retention_for_day,
     parse_parameters,
     parse_retention_schedule,
@@ -36,6 +37,24 @@ def test_get_deck_config_id() -> None:
     # 3. Default to 1
     assert get_deck_config_id(b"", b"") == 1
     assert get_deck_config_id(b"\x10\x01", b"\x10\x01") == 1
+
+
+def test_get_field_from_proto() -> None:
+    # Field 1, value 1
+    assert get_field_from_proto(b"\x08\x01", 1) == 1
+    # Field 2, skip it and find field 1
+    assert get_field_from_proto(b"\x10\x05\x08\x01", 1) == 1
+    # Field not found
+    assert get_field_from_proto(b"\x10\x05", 1) is None
+    # Empty
+    assert get_field_from_proto(b"", 1) is None
+    # Wire type skip tests (fixed64 = 1, length delimited = 2, fixed32 = 5)
+    # fixed64 field 2 (tag 0x11), then field 1 (tag 0x08)
+    data_fixed64 = b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x08\x01"
+    assert get_field_from_proto(data_fixed64, 1) == 1
+    # fixed32 field 2 (tag 0x15), then field 1
+    data_fixed32 = b"\x15\x00\x00\x00\x00\x08\x01"
+    assert get_field_from_proto(data_fixed32, 1) == 1
 
 
 def test_parse_retention_schedule() -> None:

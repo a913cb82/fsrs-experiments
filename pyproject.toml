@@ -10,6 +10,8 @@ dependencies = [
     "tqdm",
     "matplotlib",
     "scipy",
+    "seaborn",
+    "scikit-learn",
 ]
 
 [build-system]

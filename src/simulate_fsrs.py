@@ -53,6 +53,7 @@ __all__ = [
     "Scheduler",
     "DEFAULT_PARAMETERS",
     "infer_review_weights",
+    "get_review_history_stats",
 ]
 
 
@@ -220,7 +221,6 @@ def get_deck_config_id(common_blob: bytes, kind_blob: bytes) -> int:
     Defaults to 1 if not found.
     """
     # 1. Try NormalDeck.config_id (field 1 of sub-message in field 1 of kind blob)
-    # kind_blob -> DeckKindProto.normal (field 1, length delimited) -> NormalDeck
     if kind_blob:
         pos = 0
         while pos < len(kind_blob):
@@ -308,18 +308,9 @@ def load_anki_history(
                 d_common = bytes(d_common_raw) if d_common_raw is not None else b""
                 d_kind = bytes(d_kind_raw) if d_kind_raw is not None else b""
 
-                # Check explicitly set config_id
-                cid = None
-                # NormalDeck.config_id has priority in modern Anki for
-                # Normal decks. However, Filtered decks don't have it.
-                # We'll use our helper which handles both.
                 cid_found = get_deck_config_id(d_common, d_kind)
 
-                # Inheritance logic: If it's the default config (1), it MIGHT
-                # be inheriting from a parent if it's a subdeck.
-                # Actually, in Anki, if a subdeck is created, it defaults to 1
-                # unless changed. If it's 1, we check if any parent has a
-                # non-1 config.
+                # Inheritance logic
                 if cid_found == 1:
                     parts = d_name.split("::")
                     for i in range(len(parts) - 1, 0, -1):
@@ -388,7 +379,6 @@ def load_anki_history(
 
         # Informative error if deck_config_name filter matched nothing
         if deck_config_name and not valid_deck_ids:
-            # Calculate card counts per config for informative error
             cur.execute("SELECT did, count(*) FROM cards GROUP BY did")
             cards_per_deck = {int(r[0]): int(r[1]) for r in cur.fetchall()}
 
@@ -416,7 +406,7 @@ def load_anki_history(
         tqdm.write(f"Querying reviews for {len(valid_deck_ids)} matching decks...")
         placeholders = ",".join(["?" for _ in valid_deck_ids])
         query = f"""
-            SELECT r.cid, r.ease, r.id, r.type
+            SELECT r.cid, r.ease, r.id, r.type, r.time
             FROM revlog r
             JOIN cards c ON r.cid = c.id
             WHERE r.ease BETWEEN 1 AND 4
@@ -435,14 +425,14 @@ def load_anki_history(
     first_review_time = None
     last_review_time = START_DATE
 
-    for cid_v, ease, rev_id, _rev_type in rows:
+    for cid_v, ease, rev_id, _rev_type, duration_ms in rows:
         cid = int(cid_v)
         dt = datetime.fromtimestamp(rev_id / 1000.0, tz=timezone.utc)
         log = ReviewLog(
             card_id=cid,
             rating=Rating(ease),
             review_datetime=dt,
-            review_duration=None,
+            review_duration=int(duration_ms) if duration_ms else None,
         )
         card_logs[cid].append(log)
         if first_review_time is None or dt < first_review_time:
@@ -459,6 +449,52 @@ def load_anki_history(
         )
 
     return card_logs, last_review_time
+
+
+def get_review_history_stats(
+    card_logs: dict[int, list[ReviewLog]],
+    parameters: tuple[float, ...],
+) -> list[dict[str, Any]]:
+    """
+    Replays review history using provided parameters and returns a list of
+    stats for each review (retention, rating, duration, etc).
+    Only includes reviews where delta_t > 0 (subsequent reviews).
+    """
+    scheduler = Scheduler(parameters=parameters)
+    stats = []
+
+    for cid, logs in card_logs.items():
+        if not logs:
+            continue
+
+        sorted_logs = sorted(logs, key=lambda x: x.review_datetime)
+
+        card = Card(card_id=cid)
+        # Replay history
+        for i, log in enumerate(sorted_logs):
+            if i > 0:
+                retrievability = scheduler.get_card_retrievability(
+                    card, log.review_datetime
+                )
+                stats.append(
+                    {
+                        "card_id": cid,
+                        "retention": retrievability,
+                        "rating": int(log.rating),
+                        "duration": log.review_duration,
+                        "stability": card.stability,
+                        "difficulty": card.difficulty,
+                        "elapsed_days": (
+                            log.review_datetime - card.last_review
+                        ).total_seconds()
+                        / 86400.0,
+                    }
+                )
+
+            # Update card state for the NEXT review
+            card, _ = scheduler.review_card(card, log.rating, log.review_datetime)
+
+    return stats
 
 
 def simulate_day(
