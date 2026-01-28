@@ -32,14 +32,14 @@ except ImportError:
 START_DATE = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
 # Probabilities given recall (Success) - Defaults
-DEFAULT_PROB_HARD = 0.15
-DEFAULT_PROB_GOOD = 0.75
-DEFAULT_PROB_EASY = 0.10
+DEFAULT_PROB_HARD = 0.1
+DEFAULT_PROB_GOOD = 0.8
+DEFAULT_PROB_EASY = 0.1
 
 # Weights for new cards (first review ratings) - Defaults
-DEFAULT_PROB_FIRST_AGAIN = 0.2
-DEFAULT_PROB_FIRST_HARD = 0.2
-DEFAULT_PROB_FIRST_GOOD = 0.5
+DEFAULT_PROB_FIRST_AGAIN = 0.5
+DEFAULT_PROB_FIRST_HARD = 0.1
+DEFAULT_PROB_FIRST_GOOD = 0.3
 DEFAULT_PROB_FIRST_EASY = 0.1
 
 __all__ = [
