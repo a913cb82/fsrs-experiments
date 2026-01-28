@@ -64,7 +64,8 @@ def test_load_old_json_schema(tmp_path: Any) -> None:
         "ease integer, type integer, time integer)"
     )
     cur.execute(
-        "INSERT INTO revlog (id, cid, ease, type, time) VALUES (1000000, 10, 3, 0, 5000)"
+        "INSERT INTO revlog (id, cid, ease, type, time) "
+        "VALUES (1000000, 10, 3, 0, 5000)"
     )
 
     conn.commit()
@@ -113,7 +114,8 @@ def test_relational_inheritance(tmp_path: Any) -> None:
     )
     cur.execute(sql_rev)
     cur.execute(
-        "INSERT INTO revlog (id, cid, ease, type, time) VALUES (1000000, 10, 3, 0, 5000)"
+        "INSERT INTO revlog (id, cid, ease, type, time) "
+        "VALUES (1000000, 10, 3, 0, 5000)"
     )
 
     conn.commit()
