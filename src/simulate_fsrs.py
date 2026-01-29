@@ -534,8 +534,8 @@ def simulate_day(
     sys_cards: list[Card],
     card_logs: dict[int, list[ReviewLog]],
     current_date: datetime,
-    review_limit: int,
-    new_limit: int,
+    review_limit: int | None,
+    new_limit: int | None,
     weights: dict[str, list[float]] | None = None,
     time_limit: float | None = None,
     time_estimator: Any | None = None,
@@ -574,7 +574,7 @@ def simulate_day(
         if time_limit is not None:
             if time_accumulated >= time_limit:
                 break
-        elif reviews_done >= review_limit:
+        elif review_limit is not None and reviews_done >= review_limit:
             break
 
         sys_card = sys_cards[idx]
@@ -619,9 +619,9 @@ def simulate_day(
         if time_limit is not None:
             if time_accumulated >= time_limit:
                 break
-        elif reviews_done >= review_limit:
+        elif review_limit is not None and reviews_done >= review_limit:
             break
-        elif new_done >= new_limit:
+        elif new_limit is not None and new_done >= new_limit:
             break
 
         base_card = Card()
@@ -695,8 +695,8 @@ def parse_parameters(params_str: str) -> tuple[float, ...]:
 def run_simulation(
     n_days: int = 365,
     burn_in_days: int = 0,
-    review_limit: int = 200,
-    new_limit: int = 10,
+    review_limit: int | None = 200,
+    new_limit: int | None = 10,
     retention: str = "0.9",
     verbose: bool = True,
     seed: int = 42,
