@@ -18,7 +18,7 @@ from src.simulate_fsrs import (
     RustOptimizer,
     run_simulation,
 )
-from src.simulation_config import SimulationConfig
+from src.simulation_config import RatingWeights, SeededData, SimulationConfig
 from src.utils import get_retention_for_day, parse_parameters, parse_retention_schedule
 
 
@@ -82,12 +82,12 @@ def test_run_simulation_with_seeded_data() -> None:
     true_cards = {1: Card(card_id=1, due=now)}
     sys_cards = {1: Card(card_id=1, due=now)}
 
-    seeded_payload = {
-        "logs": logs,
-        "last_rev": now - timedelta(days=1),
-        "true_cards": true_cards,
-        "sys_cards": sys_cards,
-    }
+    seeded_payload = SeededData(
+        logs=logs,
+        last_rev=now - timedelta(days=1),
+        true_cards=true_cards,
+        sys_cards=sys_cards,
+    )
 
     config = SimulationConfig(n_days=2, review_limit=5, verbose=False)
     fitted, _, metrics = run_simulation(config, seeded_data=seeded_payload)
@@ -145,17 +145,17 @@ def test_load_anki_history_missing_file() -> None:
 
 
 def test_run_simulation_with_custom_weights() -> None:
-    weights = {"first": [0.1, 0.1, 0.7, 0.1], "success": [0.1, 0.8, 0.1]}
+    weights = RatingWeights(first=[0.1, 0.1, 0.7, 0.1], success=[0.1, 0.8, 0.1])
     config = SimulationConfig(n_days=5, review_limit=10, verbose=False)
     fitted, _, metrics = run_simulation(
         config,
-        seeded_data={
-            "last_rev": datetime.now(timezone.utc),
-            "true_cards": {},
-            "sys_cards": {},
-            "logs": defaultdict(list),
-            "weights": weights,
-        },
+        seeded_data=SeededData(
+            last_rev=datetime.now(timezone.utc),
+            true_cards={},
+            sys_cards={},
+            logs=defaultdict(list),
+            weights=weights,
+        ),
     )
     assert fitted is not None
     assert metrics["review_count"] > 0
@@ -351,12 +351,12 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
         return 100.0
 
     now = datetime.now(timezone.utc)
-    seeded_data = {
-        "logs": defaultdict(list),
-        "last_rev": now - timedelta(days=1),
-        "true_cards": {1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
-        "sys_cards": {1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
-    }
+    seeded_data = SeededData(
+        logs=defaultdict(list),
+        last_rev=now - timedelta(days=1),
+        true_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
+        sys_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
+    )
     config = SimulationConfig(
         n_days=1, time_limit=100.0, time_estimator=time_estimator, verbose=False
     )

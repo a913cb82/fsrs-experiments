@@ -123,18 +123,18 @@ def test_infer_review_weights() -> None:
     weights = infer_review_weights(logs)
 
     # First ratings: 1 Good (pos 3), 1 Again (pos 1) -> 50% each
-    assert weights["first"][0] == 0.5  # Again
-    assert weights["first"][1] == 0.0  # Hard
-    assert weights["first"][2] == 0.5  # Good
-    assert weights["first"][3] == 0.0  # Easy
+    assert weights.first[0] == 0.5  # Again
+    assert weights.first[1] == 0.0  # Hard
+    assert weights.first[2] == 0.5  # Good
+    assert weights.first[3] == 0.0  # Easy
 
     # Subsequent Success (recalled) ratings:
     # Card 1: Good (pos 2)
     # Card 2: Hard (pos 1), Easy (pos 3)
     # Total: 1 Hard, 1 Good, 1 Easy -> 33.3% each
-    assert abs(weights["success"][0] - 0.3333) < 0.001  # Hard
-    assert abs(weights["success"][1] - 0.3333) < 0.001  # Good
-    assert abs(weights["success"][2] - 0.3333) < 0.001  # Easy
+    assert abs(weights.success[0] - 0.3333) < 0.001  # Hard
+    assert abs(weights.success[1] - 0.3333) < 0.001  # Good
+    assert abs(weights.success[2] - 0.3333) < 0.001  # Easy
 
 
 def test_calculate_population_retrievability() -> None:

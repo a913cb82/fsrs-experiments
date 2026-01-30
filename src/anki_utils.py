@@ -8,6 +8,8 @@ from typing import Any
 from fsrs import Card, Rating, ReviewLog, Scheduler
 from tqdm import tqdm
 
+from simulation_config import RatingWeights
+
 # Constants for Anki processing
 START_DATE = datetime(2023, 1, 1, tzinfo=timezone.utc)
 
@@ -322,10 +324,10 @@ def load_anki_history(
 
 def infer_review_weights(
     card_logs: dict[int, list[ReviewLog]],
-) -> dict[str, list[float]]:
+) -> RatingWeights:
     """
     Infers rating probabilities from real review history.
-    Returns weights for first reviews and weights for subsequent successful reviews.
+    Returns RatingWeights for first reviews and subsequent successful reviews.
     """
     first_ratings = [0, 0, 0, 0]  # Again, Hard, Good, Easy
     success_ratings = [0, 0, 0]  # Hard, Good, Easy
@@ -370,7 +372,7 @@ def infer_review_weights(
             DEFAULT_PROB_EASY,
         ]
 
-    return {"first": first_weights, "success": success_weights}
+    return RatingWeights(first=first_weights, success=success_weights)
 
 
 def get_review_history_stats(
@@ -386,7 +388,7 @@ def get_review_history_stats(
 
     # Inferred features for new cards
     weights_inf = infer_review_weights(card_logs)
-    w_first = weights_inf["first"]
+    w_first = weights_inf.first
     prob_first_success = 1.0 - w_first[0]
     expected_d0 = calculate_expected_d0(w_first, parameters)
 

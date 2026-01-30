@@ -2,13 +2,22 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from fsrs import Card
+from fsrs import Card, ReviewLog
 
 
 @dataclass
 class RatingWeights:
     first: list[float] = field(default_factory=lambda: [0.5, 0.1, 0.3, 0.1])
     success: list[float] = field(default_factory=lambda: [0.1, 0.8, 0.1])
+
+
+@dataclass
+class SeededData:
+    logs: dict[int, list[ReviewLog]]
+    last_rev: datetime
+    true_cards: dict[int, Card]
+    sys_cards: dict[int, Card]
+    weights: RatingWeights | None = None
 
 
 @dataclass

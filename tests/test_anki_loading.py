@@ -199,7 +199,7 @@ def test_weight_inference_from_test_db() -> None:
     # Total First: [0, 0, 2, 0] -> Good=1.0
     # Total Success: [0, 2, 0] -> Good=1.0
 
-    assert weights["first"][2] == 1.0
-    assert weights["success"][1] == 1.0
-    assert weights["first"][0] == 0.0
-    assert weights["success"][0] == 0.0
+    assert weights.first[2] == 1.0
+    assert weights.success[1] == 1.0
+    assert weights.first[0] == 0.0
+    assert weights.success[0] == 0.0

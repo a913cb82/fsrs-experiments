@@ -4,6 +4,8 @@ import numpy as np
 from fsrs.scheduler import DEFAULT_PARAMETERS
 from scipy.stats import entropy
 
+from simulation_config import SeededData
+
 
 def calculate_population_retrievability(
     t: np.ndarray[Any, Any],
@@ -70,10 +72,10 @@ def calculate_metrics(
 
 
 # Global storage for worker processes to avoid pickling overhead
-_worker_seeded_data: dict[str, Any] | None = None
+_worker_seeded_data: SeededData | None = None
 
 
-def init_worker(seeded_payload: dict[str, Any] | None) -> None:
+def init_worker(seeded_payload: SeededData | None) -> None:
     global _worker_seeded_data
     _worker_seeded_data = seeded_payload
 

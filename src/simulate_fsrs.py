@@ -12,7 +12,7 @@ from anki_utils import (
     infer_review_weights,
     load_anki_history,
 )
-from simulation_config import RatingWeights, SimulationConfig
+from simulation_config import RatingWeights, SeededData, SimulationConfig
 from utils import (
     _worker_seeded_data,
     get_retention_for_day,
@@ -230,7 +230,7 @@ def run_simulation(
     config: SimulationConfig,
     ground_truth: tuple[float, ...] | None = None,
     initial_params: tuple[float, ...] | None = None,
-    seeded_data: dict[str, Any] | None = None,
+    seeded_data: SeededData | None = None,
     seed_history: str | None = None,
     deck_config: str | None = None,
     deck_name: str | None = None,
@@ -273,17 +273,17 @@ def run_simulation(
         s_data = seeded_data or _worker_seeded_data
 
         if s_data:
-            current_date = s_data["last_rev"] + timedelta(days=1)
-            true_cards = list(deepcopy(s_data["true_cards"]).values())
-            sys_cards = list(deepcopy(s_data["sys_cards"]).values())
-            card_logs = deepcopy(s_data["logs"])
-            if "weights" in s_data:
-                config.weights = RatingWeights(**s_data["weights"])
+            current_date = s_data.last_rev + timedelta(days=1)
+            true_cards = list(deepcopy(s_data.true_cards).values())
+            sys_cards = list(deepcopy(s_data.sys_cards).values())
+            card_logs = deepcopy(s_data.logs)
+            if s_data.weights:
+                config.weights = s_data.weights
         elif seed_history:
             logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
             w_inf = infer_review_weights(logs)
-            config.weights = RatingWeights(**w_inf)
+            config.weights = w_inf
             for cid, logs_list in logs.items():
                 card = Card(card_id=cid)
                 true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
