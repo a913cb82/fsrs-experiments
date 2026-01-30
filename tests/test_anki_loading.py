@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from src.simulate_fsrs import load_anki_history
+from src.anki_utils import load_anki_history
 
 TEST_DB = "tests/test_collection.anki2"
 
@@ -188,7 +188,7 @@ def test_load_anki_history_malformed_json(tmp_path: Any) -> None:
 
 
 def test_weight_inference_from_test_db() -> None:
-    from src.simulate_fsrs import infer_review_weights
+    from src.anki_utils import infer_review_weights
 
     logs, _ = load_anki_history(TEST_DB)
     weights = infer_review_weights(logs)

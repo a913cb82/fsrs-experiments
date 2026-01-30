@@ -1,8 +1,15 @@
-from src.simulate_fsrs import (
-    DEFAULT_PARAMETERS,
+import numpy as np
+from fsrs.scheduler import DEFAULT_PARAMETERS
+
+from src.anki_utils import (
     decode_varint,
     get_deck_config_id,
     get_field_from_proto,
+    infer_review_weights,
+)
+from src.utils import (
+    calculate_metrics,
+    calculate_population_retrievability,
     get_retention_for_day,
     parse_parameters,
     parse_retention_schedule,
@@ -96,7 +103,7 @@ def test_parse_parameters() -> None:
 def test_infer_review_weights() -> None:
     from datetime import datetime, timedelta, timezone
 
-    from src.simulate_fsrs import Rating, ReviewLog, infer_review_weights
+    from fsrs import Rating, ReviewLog
 
     now = datetime.now(timezone.utc)
     # Card 1: 1st Good, 2nd Good
@@ -128,3 +135,35 @@ def test_infer_review_weights() -> None:
     assert abs(weights["success"][0] - 0.3333) < 0.001  # Hard
     assert abs(weights["success"][1] - 0.3333) < 0.001  # Good
     assert abs(weights["success"][2] - 0.3333) < 0.001  # Easy
+
+
+def test_calculate_population_retrievability() -> None:
+    t = np.linspace(0, 10, 11)
+    stabilities = np.array([1.0, 5.0, 10.0])
+    params = [0.1] * 21
+
+    res = calculate_population_retrievability(t, stabilities, params)
+    assert len(res) == 11
+    assert res[0] == 1.0
+    assert np.all(res <= 1.0)
+    assert np.all(res >= 0.0)
+
+    assert np.all(calculate_population_retrievability(t, np.array([]), params) == 1.0)
+
+
+def test_calculate_metrics() -> None:
+    gt_params = [0.1] * 21
+    fit_params = [0.1] * 21
+    stabilities = [(1.0, 1.0), (5.0, 5.0)]
+
+    rmse, kl = calculate_metrics(gt_params, fit_params, stabilities)
+    assert rmse == 0.0
+    assert kl == 0.0
+
+    fit_params_diff = list(gt_params)
+    fit_params_diff[20] = 0.5
+    rmse, kl = calculate_metrics(gt_params, fit_params_diff, stabilities)
+    assert rmse > 0
+    assert kl > 0
+
+    assert calculate_metrics(gt_params, fit_params, []) == (0.0, 0.0)
