@@ -146,6 +146,24 @@ def test_run_simulation_with_custom_weights() -> None:
     assert metrics["review_count"] > 0
 
 
+def test_run_simulation_with_rating_estimator() -> None:
+    def rating_estimator(card: Card, current_date: datetime) -> int:
+        return 4  # Always 'Easy'
+
+    _, _, metrics = run_simulation(
+        n_days=5,
+        review_limit=20,
+        new_limit=10,
+        rating_estimator=rating_estimator,
+        verbose=False,
+    )
+
+    assert metrics["review_count"] > 0
+    # Verify all logs in the metrics have the forced rating
+    for log in metrics["logs"]:
+        assert log.rating == Rating.Easy
+
+
 def test_run_simulation_cli_basic(monkeypatch: Any) -> None:
     import sys
 

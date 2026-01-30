@@ -539,6 +539,7 @@ def simulate_day(
     weights: dict[str, list[float]] | None = None,
     time_limit: float | None = None,
     time_estimator: Any | None = None,
+    rating_estimator: Any | None = None,
 ) -> None:
     # Use NumPy for fast due-check across the deck
     dues = np.array([c.due for c in sys_cards])
@@ -581,17 +582,21 @@ def simulate_day(
         true_card = true_cards[idx]
         card_id = sys_card.card_id
 
-        retrievability = nature_scheduler.get_card_retrievability(
-            true_card, current_date
-        )
-
-        if random.random() < retrievability:
-            rating = random.choices(
-                [Rating.Hard, Rating.Good, Rating.Easy],
-                weights=w_success,
-            )[0]
+        if rating_estimator is not None:
+            rating_val = rating_estimator(true_card, current_date)
+            rating = Rating(rating_val)
         else:
-            rating = Rating.Again
+            retrievability = nature_scheduler.get_card_retrievability(
+                true_card, current_date
+            )
+
+            if random.random() < retrievability:
+                rating = random.choices(
+                    [Rating.Hard, Rating.Good, Rating.Easy],
+                    weights=w_success,
+                )[0]
+            else:
+                rating = Rating.Again
 
         # Estimate time if estimator is provided
         if time_estimator is not None:
@@ -628,10 +633,14 @@ def simulate_day(
         true_card = deepcopy(base_card)
         sys_card = deepcopy(base_card)
 
-        rating = random.choices(
-            [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-            weights=w_first,
-        )[0]
+        if rating_estimator is not None:
+            rating_val = rating_estimator(sys_card, current_date)
+            rating = Rating(rating_val)
+        else:
+            rating = random.choices(
+                [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
+                weights=w_first,
+            )[0]
 
         # Estimate time for new card
         if time_estimator is not None:
@@ -709,6 +718,7 @@ def run_simulation(
     seeded_data: dict[str, Any] | None = None,
     time_limit: float | None = None,
     time_estimator: Any | None = None,
+    rating_estimator: Any | None = None,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(retention)
     initial_retention = get_retention_for_day(0, parsed_schedule)
@@ -790,6 +800,7 @@ def run_simulation(
                 weights=review_weights,
                 time_limit=time_limit,
                 time_estimator=time_estimator,
+                rating_estimator=rating_estimator,
             )
             current_date += timedelta(days=1)
 
@@ -833,6 +844,7 @@ def run_simulation(
                     weights=review_weights,
                     time_limit=time_limit,
                     time_estimator=time_estimator,
+                    rating_estimator=rating_estimator,
                 )
                 current_date += timedelta(days=1)
 
@@ -873,6 +885,7 @@ def run_simulation(
                 "card_count": len(true_cards),
                 "stabilities": stabilities,
                 "total_retention": total_retention,
+                "logs": all_logs_final,
             },
         )
     finally:
