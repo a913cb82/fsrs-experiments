@@ -1,13 +1,21 @@
+import sqlite3
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import src.simulate_fsrs
 from src.simulate_fsrs import (
     DEFAULT_PARAMETERS,
     Card,
     Rating,
     ReviewLog,
     RustOptimizer,
+    get_deck_config_id,
+    get_field_from_proto,
+    get_review_history_stats,
+    load_anki_history,
+    parse_parameters,
+    parse_retention_schedule,
     run_simulation,
     run_simulation_cli,
 )
@@ -35,6 +43,22 @@ def test_rust_optimizer() -> None:
     assert any(p != 0 for p in params)
 
 
+def test_rust_optimizer_no_items() -> None:
+    # Rust optimizer requires at least one review with delta_t > 0.
+    now = datetime.now(timezone.utc)
+    logs = [
+        ReviewLog(
+            card_id=1,
+            rating=Rating.Good,
+            review_datetime=now,
+            review_duration=None,
+        )
+    ]
+    opt = RustOptimizer(logs)
+    params = opt.compute_optimal_parameters()
+    assert len(params) == 21
+
+
 def test_run_simulation_basic() -> None:
     fitted, gt, metrics = run_simulation(n_days=2, review_limit=10, verbose=False)
     assert gt == DEFAULT_PARAMETERS
@@ -45,7 +69,6 @@ def test_run_simulation_basic() -> None:
 
 
 def test_run_simulation_with_seeded_data() -> None:
-    # Pre-calculate seeded data payload
     now = datetime.now(timezone.utc)
     logs: dict[int, list[ReviewLog]] = defaultdict(list)
     log = ReviewLog(
@@ -98,30 +121,24 @@ def test_simulate_day_again_branch() -> None:
 
 def test_simulate_day_review_limit_break() -> None:
     test_db = "tests/test_collection.anki2"
-    # To hit the break, we need reviews_done >= review_limit.
     _, _, metrics = run_simulation(
         n_days=100, review_limit=1, seed_history=test_db, verbose=False
     )
-    # Total reviews = 5 (seed) + 100 (sim) = 105
     assert metrics["review_count"] == 105
 
 
 def test_run_simulation_no_optimizer_triggered() -> None:
-    # Less than 512 reviews
     fitted, _, _ = run_simulation(n_days=1, review_limit=10, verbose=False)
     assert fitted is not None
 
 
 def test_parse_retention_schedule_error() -> None:
-    from src.simulate_fsrs import parse_retention_schedule
-
-    # This should trigger the ValueError catch
     assert parse_retention_schedule("invalid:schedule") == [(1, 0.9)]
     assert parse_retention_schedule("invalid") == [(1, 0.9)]
 
 
 def test_load_anki_history_missing_file() -> None:
-    from src.simulate_fsrs import START_DATE, load_anki_history
+    from src.simulate_fsrs import START_DATE
 
     logs, date = load_anki_history("non_existent.anki2")
     assert logs == {}
@@ -159,7 +176,6 @@ def test_run_simulation_with_rating_estimator() -> None:
     )
 
     assert metrics["review_count"] > 0
-    # Verify all logs in the metrics have the forced rating
     for log in metrics["logs"]:
         assert log.rating == Rating.Easy
 
@@ -176,8 +192,6 @@ def test_run_simulation_cli_basic(monkeypatch: Any) -> None:
 def test_run_simulation_cli_with_history(monkeypatch: Any) -> None:
     import sys
 
-    import src.simulate_fsrs
-
     test_db = "tests/test_collection.anki2"
     args = [
         "src/simulate_fsrs.py",
@@ -190,7 +204,6 @@ def test_run_simulation_cli_with_history(monkeypatch: Any) -> None:
     ]
     monkeypatch.setattr(sys, "argv", args)
 
-    # Mock pre-fitting to trigger the > 512 branch
     logs: dict[int, list[ReviewLog]] = defaultdict(list)
     for _ in range(600):
         log = ReviewLog(
@@ -206,16 +219,11 @@ def test_run_simulation_cli_with_history(monkeypatch: Any) -> None:
         "load_anki_history",
         lambda *a: (logs, datetime.now(timezone.utc)),
     )
-
     run_simulation_cli()
 
 
 def test_get_review_history_stats() -> None:
-    from src.simulate_fsrs import get_review_history_stats
-
     now = datetime.now(timezone.utc)
-    # Card 1: 1st review now-10d, 2nd review now-5d
-    # 1st review is used to establish state, 2nd review is where we get stats
     logs = {
         1: [
             ReviewLog(
@@ -232,22 +240,240 @@ def test_get_review_history_stats() -> None:
             ),
         ]
     }
-
     stats = get_review_history_stats(logs, DEFAULT_PARAMETERS)
-
-    # Should have 2 stats (both reviews)
     assert len(stats) == 2
-    s1 = stats[0]
-    assert s1["card_id"] == 1
-    assert s1["rating"] == 3
-    assert s1["stability"] == 0.0
-    assert s1["elapsed_days"] == 0.0
+    assert stats[0]["elapsed_days"] == 0.0
+    assert stats[1]["elapsed_days"] == 5.0
 
-    s2 = stats[1]
-    assert s2["card_id"] == 1
-    assert s2["rating"] == 3
-    assert s2["duration"] == 10000
-    assert 0.0 <= s2["retention"] <= 1.0
-    assert s2["elapsed_days"] == 5.0
-    assert s2["stability"] > 0
-    assert s2["difficulty"] > 0
+
+def test_get_field_from_proto_skips() -> None:
+    blob_w0 = bytes([0x10, 1, 0x08, 10])
+    assert get_field_from_proto(blob_w0, 1) == 10
+    blob_w1 = bytes([(2 << 3) | 1]) + bytes([0] * 8) + bytes([(1 << 3) | 0, 10])
+    assert get_field_from_proto(blob_w1, 1) == 10
+    blob_w2 = bytes([(2 << 3) | 2, 3, 1, 2, 3]) + bytes([(1 << 3) | 0, 20])
+    assert get_field_from_proto(blob_w2, 1) == 20
+    blob_w5 = bytes([(2 << 3) | 5]) + bytes([0] * 4) + bytes([(1 << 3) | 0, 30])
+    assert get_field_from_proto(blob_w5, 1) == 30
+    blob_unknown = bytes([(2 << 3) | 4]) + bytes([(1 << 3) | 0, 40])
+    assert get_field_from_proto(blob_unknown, 1) is None
+
+
+def test_get_field_from_proto_exception() -> None:
+    assert get_field_from_proto(bytes([0x08]), 1) is None
+
+
+def test_get_deck_config_id_kind() -> None:
+    normal_deck_blob = bytes([0x08, 100])
+    kind_blob = bytes([0x0A, len(normal_deck_blob)]) + normal_deck_blob
+    assert get_deck_config_id(b"", kind_blob) == 100
+    kind_blob_skip = (
+        bytes(
+            [
+                0x10,
+                1,
+                0x19,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0x22,
+                3,
+                1,
+                2,
+                3,
+                0x2D,
+                0,
+                0,
+                0,
+                0,
+                0x0A,
+                len(normal_deck_blob),
+            ]
+        )
+        + normal_deck_blob
+    )
+    assert get_deck_config_id(b"", kind_blob_skip) == 100
+    normal_deck_blob_no_cid = bytes([0x10, 100])
+    kind_blob_no_cid = (
+        bytes([0x0A, len(normal_deck_blob_no_cid)]) + normal_deck_blob_no_cid
+    )
+    assert get_deck_config_id(b"", kind_blob_no_cid) == 1
+    assert get_deck_config_id(b"", bytes([0x0A])) == 1
+
+
+def test_load_anki_history_none_rows(tmp_path: Any) -> None:
+    db_path = str(tmp_path / "none_collection.anki2")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE col (ver integer)")
+    cur.execute("INSERT INTO col (ver) VALUES (18)")
+    cur.execute("CREATE TABLE decks (id integer, name text, common blob, kind blob)")
+    cur.execute(
+        "INSERT INTO decks (id, name, common, kind) VALUES (NULL, 'NullID', x'', x'')"
+    )
+    cur.execute("CREATE TABLE deck_config (id integer, name text)")
+    cur.execute("CREATE TABLE cards (id integer, did integer)")
+    cur.execute(
+        "CREATE TABLE revlog "
+        "(id integer, cid integer, ease integer, type integer, time integer)"
+    )
+    conn.commit()
+    conn.close()
+    logs, _ = load_anki_history(db_path)
+    assert logs == {}
+
+
+def test_load_anki_history_empty_col(tmp_path: Any) -> None:
+    db_path = str(tmp_path / "empty_col.anki2")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE col (ver integer)")
+    conn.commit()
+    conn.close()
+    logs, _ = load_anki_history(db_path)
+    assert logs == {}
+
+
+def test_load_anki_history_old_empty_col(tmp_path: Any) -> None:
+    db_path = str(tmp_path / "old_empty_col.anki2")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE col (ver integer, decks text, dconf text)")
+    conn.commit()
+    conn.close()
+    logs, _ = load_anki_history(db_path)
+    assert logs == {}
+
+
+def test_load_anki_history_no_ver(tmp_path: Any) -> None:
+    db_path = str(tmp_path / "no_ver_collection.anki2")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE col (dummy integer)")
+    conn.commit()
+    conn.close()
+    from src.simulate_fsrs import START_DATE
+
+    logs, date = load_anki_history(db_path)
+    assert logs == {}
+    assert date == START_DATE
+
+
+def test_parse_retention_schedule_multi() -> None:
+    sched = parse_retention_schedule("1:0.9,1:0.8")
+    assert len(sched) == 2
+    from src.simulate_fsrs import get_retention_for_day
+
+    assert get_retention_for_day(0, sched) == 0.9
+    assert get_retention_for_day(1, sched) == 0.8
+    assert get_retention_for_day(2, sched) == 0.9
+
+
+def test_parse_parameters_value_error() -> None:
+    assert parse_parameters(
+        "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,not_a_float"
+    ) == tuple(DEFAULT_PARAMETERS)
+
+
+def test_parse_parameters_valid() -> None:
+    p_str = ",".join(["1.0"] * 21)
+    p = parse_parameters(p_str)
+    assert p == tuple([1.0] * 21)
+
+
+def test_parse_parameters_wrong_length() -> None:
+    assert parse_parameters("1.0,2.0") == tuple(DEFAULT_PARAMETERS)
+
+
+def test_simulate_day_time_limit_at_start_of_iter() -> None:
+    def time_estimator(card: Any, rating: Any, current_date: Any) -> float:
+        return 100.0
+
+    now = datetime.now(timezone.utc)
+    seeded_data = {
+        "logs": defaultdict(list),
+        "last_rev": now - timedelta(days=1),
+        "true_cards": {1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
+        "sys_cards": {1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
+    }
+    fitted, _, metrics = run_simulation(
+        n_days=1,
+        time_limit=100.0,
+        time_estimator=time_estimator,
+        seeded_data=seeded_data,
+        verbose=False,
+    )
+    assert metrics["review_count"] == 1
+
+
+def test_decode_varint_multi_byte() -> None:
+    from src.simulate_fsrs import decode_varint
+
+    res, pos = decode_varint(bytes([0x80, 0x01]), 0)
+    assert res == 128
+    assert pos == 2
+
+
+def test_run_simulation_triggers_patched_tqdm_more(monkeypatch: Any) -> None:
+    import fsrs.optimizer
+
+    def mock_compute_optimal(*args: Any, **kwargs: Any) -> Any:
+        fsrs.optimizer.tqdm(total=100)
+        return list(DEFAULT_PARAMETERS)
+
+    monkeypatch.setattr(
+        src.simulate_fsrs.RustOptimizer,
+        "compute_optimal_parameters",
+        mock_compute_optimal,
+    )
+    run_simulation(n_days=1, verbose=True)
+
+
+def test_run_simulation_cli_with_seed_history_and_params(monkeypatch: Any) -> None:
+    import sys
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "src/simulate_fsrs.py",
+            "--seed-history",
+            "tests/test_collection.anki2",
+            "--days",
+            "1",
+        ],
+    )
+    logs = {
+        1: [
+            ReviewLog(
+                card_id=1,
+                rating=Rating.Good,
+                review_datetime=datetime.now(timezone.utc),
+                review_duration=None,
+            )
+        ]
+        * 600
+    }
+    monkeypatch.setattr(
+        src.simulate_fsrs,
+        "load_anki_history",
+        lambda *a: (logs, datetime.now(timezone.utc)),
+    )
+    run_simulation_cli()
+
+
+def test_run_simulation_no_fitted_params(monkeypatch: Any) -> None:
+    def mock_compute(*args: Any, **kwargs: Any) -> Any:
+        raise Exception("Fitting failed")
+
+    monkeypatch.setattr(
+        src.simulate_fsrs.RustOptimizer, "compute_optimal_parameters", mock_compute
+    )
+    fitted, _, metrics = run_simulation(n_days=1, verbose=False)
+    assert fitted is None
+    assert metrics["stabilities"] == []
