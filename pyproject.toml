@@ -12,6 +12,8 @@ dependencies = [
     "scipy",
     "seaborn",
     "scikit-learn",
+    "nbclient",
+    "nbformat",
 ]
 
 [build-system]
@@ -51,3 +53,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["integration: marks tests as slow integration tests"]
+addopts = "-m 'not integration'"

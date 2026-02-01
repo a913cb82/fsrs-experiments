@@ -13,9 +13,17 @@ repos:
         args: [--ignore-missing-imports, --check-untyped-defs]
   - repo: local
     hooks:
-      - id: pytest
-        name: pytest
-        entry: pytest
-        language: system
-        pass_filenames: false
-        always_run: true
+            - id: pytest
+              name: pytest
+              entry: pytest
+              language: system
+              pass_filenames: false
+              always_run: true
+            - id: pytest-integration
+              name: pytest-integration
+              entry: pytest -m integration
+              language: system
+              pass_filenames: false
+              always_run: true
+              stages: [ pre-push ]
+      

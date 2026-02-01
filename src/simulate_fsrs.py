@@ -14,7 +14,6 @@ from anki_utils import (
 )
 from simulation_config import RatingWeights, SeededData, SimulationConfig
 from utils import (
-    _worker_seeded_data,
     get_retention_for_day,
     parse_retention_schedule,
 )
@@ -269,8 +268,7 @@ def run_simulation(
         true_cards: list[Card] = []
         sys_cards: list[Card] = []
         card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
-        # Use global worker state if available and no local state provided
-        s_data = seeded_data or _worker_seeded_data
+        s_data = seeded_data
 
         if s_data:
             current_date = s_data.last_rev + timedelta(days=1)

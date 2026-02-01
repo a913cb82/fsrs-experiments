@@ -4,8 +4,6 @@ import numpy as np
 from fsrs.scheduler import DEFAULT_PARAMETERS
 from scipy.stats import entropy
 
-from simulation_config import SeededData
-
 
 def calculate_population_retrievability(
     t: np.ndarray[Any, Any],
@@ -69,15 +67,6 @@ def calculate_metrics(
     kl_per_card = np.mean(entropy(p, q, axis=0) + entropy(1 - p, 1 - q, axis=0))
 
     return float(np.mean(rmse_per_card)), float(kl_per_card)
-
-
-# Global storage for worker processes to avoid pickling overhead
-_worker_seeded_data: SeededData | None = None
-
-
-def init_worker(seeded_payload: SeededData | None) -> None:
-    global _worker_seeded_data
-    _worker_seeded_data = seeded_payload
 
 
 def parse_retention_schedule(
