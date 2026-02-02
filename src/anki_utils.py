@@ -2,13 +2,19 @@ import json
 import os
 import sqlite3
 from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from fsrs import Card, Rating, ReviewLog, Scheduler
 from tqdm import tqdm
 
-from simulation_config import RatingWeights
+
+@dataclass
+class RatingWeights:
+    first: list[float] = field(default_factory=lambda: [0.5, 0.1, 0.3, 0.1])
+    success: list[float] = field(default_factory=lambda: [0.1, 0.8, 0.1])
+
 
 # Constants for Anki processing
 START_DATE = datetime(2023, 1, 1, tzinfo=timezone.utc)

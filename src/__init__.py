@@ -1,5 +1,6 @@
 from .anki_utils import (
     START_DATE as START_DATE,
+    RatingWeights as RatingWeights,
     calculate_expected_d0 as calculate_expected_d0,
     get_review_history_stats as get_review_history_stats,
     infer_review_weights as infer_review_weights,
@@ -10,7 +11,6 @@ from .simulate_fsrs import (
     run_simulation as run_simulation,
 )
 from .simulation_config import (
-    RatingWeights as RatingWeights,
     SimulationConfig as SimulationConfig,
 )
 from .utils import (

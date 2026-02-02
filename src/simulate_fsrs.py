@@ -12,7 +12,12 @@ from anki_utils import (
     infer_review_weights,
     load_anki_history,
 )
-from simulation_config import RatingWeights, SeededData, SimulationConfig
+from simulation_config import (
+    RatingEstimator,
+    SeededData,
+    SimulationConfig,
+    TimeEstimator,
+)
 from utils import (
     get_retention_for_day,
     parse_retention_schedule,
@@ -103,28 +108,17 @@ def _process_review(
     nature_scheduler: Scheduler,
     algo_scheduler: Scheduler,
     current_date: datetime,
-    weights: RatingWeights,
-    rating_estimator: Any | None,
-    time_estimator: Any | None,
+    rating_estimator: RatingEstimator,
+    time_estimator: TimeEstimator,
 ) -> tuple[Card, Card, ReviewLog, float]:
-    if rating_estimator is not None:
-        rating_val = rating_estimator(card, current_date)
-        rating = Rating(rating_val)
-    else:
-        retrievability = nature_scheduler.get_card_retrievability(
-            true_card, current_date
-        )
-        if random.random() < retrievability:
-            rating = random.choices(
-                [Rating.Hard, Rating.Good, Rating.Easy],
-                weights=weights.success,
-            )[0]
-        else:
-            rating = Rating.Again
+    rating_val = rating_estimator(
+        true_card,
+        current_date,
+        nature_scheduler,
+    )
+    rating = Rating(rating_val)
 
-    review_time = 0.0
-    if time_estimator is not None:
-        review_time = time_estimator(card, rating, current_date)
+    review_time = time_estimator(true_card, current_date, int(rating), nature_scheduler)
 
     updated_true_card, _ = nature_scheduler.review_card(true_card, rating, current_date)
     updated_card, log = algo_scheduler.review_card(card, rating, current_date)
@@ -140,6 +134,8 @@ def simulate_day(
     card_logs: dict[int, list[ReviewLog]],
     current_date: datetime,
     config: SimulationConfig,
+    rating_estimator: RatingEstimator,
+    time_estimator: TimeEstimator,
 ) -> None:
     # Use NumPy for fast due-check across the deck
     dues = np.array([c.due for c in sys_cards])
@@ -165,9 +161,8 @@ def simulate_day(
             nature_scheduler,
             algo_scheduler,
             current_date,
-            config.weights,
-            config.rating_estimator,
-            config.time_estimator,
+            rating_estimator,
+            time_estimator,
         )
 
         if (
@@ -193,18 +188,16 @@ def simulate_day(
             break
 
         # For new cards, we determine rating first to see if it's Again/Success
-        if config.rating_estimator is not None:
-            rating_val = config.rating_estimator(Card(), current_date)
-            rating = Rating(rating_val)
-        else:
-            rating = random.choices(
-                [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-                weights=config.weights.first,
-            )[0]
+        rating_val = rating_estimator(
+            Card(),
+            current_date,
+            nature_scheduler,
+        )
+        rating = Rating(rating_val)
 
-        review_time = 0.0
-        if config.time_estimator is not None:
-            review_time = config.time_estimator(Card(), rating, current_date)
+        review_time = time_estimator(
+            Card(), current_date, int(rating), nature_scheduler
+        )
 
         if (
             config.time_limit is not None
@@ -275,13 +268,9 @@ def run_simulation(
             true_cards = list(deepcopy(s_data.true_cards).values())
             sys_cards = list(deepcopy(s_data.sys_cards).values())
             card_logs = deepcopy(s_data.logs)
-            if s_data.weights:
-                config.weights = s_data.weights
         elif seed_history:
             logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
             current_date = last_rev + timedelta(days=1)
-            w_inf = infer_review_weights(logs)
-            config.weights = w_inf
             for cid, logs_list in logs.items():
                 card = Card(card_id=cid)
                 true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
@@ -289,6 +278,62 @@ def run_simulation(
                 card_logs[cid].extend(logs_list)
         else:
             current_date = START_DATE
+
+        # Initialize estimators
+        rating_estimator = config.rating_estimator
+        if rating_estimator is None:
+            weights = infer_review_weights(card_logs)
+
+            def default_rating_est(
+                true_card: Card, date: datetime, nature_scheduler: Scheduler
+            ) -> int:
+                if true_card.stability is not None and true_card.stability > 0:
+                    retrievability = nature_scheduler.get_card_retrievability(
+                        true_card, date
+                    )
+                    if random.random() < retrievability:
+                        return int(
+                            random.choices(
+                                [Rating.Hard, Rating.Good, Rating.Easy],
+                                weights=weights.success,
+                            )[0]
+                        )
+                    else:
+                        return int(Rating.Again)
+                else:
+                    return int(
+                        random.choices(
+                            [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
+                            weights=weights.first,
+                        )[0]
+                    )
+
+            rating_estimator = default_rating_est
+
+        time_estimator = config.time_estimator
+        if time_estimator is None:
+            # Calculate average time per grade from history
+            flat_logs = [log for logs_list in card_logs.values() for log in logs_list]
+            duration_data = defaultdict(list)
+            for log in flat_logs:
+                if log.review_duration is not None:
+                    duration_data[int(log.rating)].append(log.review_duration)
+
+            # Compute averages, fallback to 0.0
+            avg_durations = {}
+            for r in [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy]:
+                durs = duration_data[int(r)]
+                avg_durations[int(r)] = float(np.mean(durs)) if durs else 0.0
+
+            def default_time_est(
+                true_card: Card,
+                date: datetime,
+                rating: int,
+                nature_scheduler: Scheduler,
+            ) -> float:
+                return avg_durations.get(rating, 0.0)
+
+            time_estimator = default_time_est
 
         limit_phase_1 = config.n_days
         if 0 < config.burn_in_days < config.n_days:
@@ -312,6 +357,8 @@ def run_simulation(
                 card_logs,
                 current_date,
                 config,
+                rating_estimator,
+                time_estimator,
             )
             current_date += timedelta(days=1)
 
@@ -347,6 +394,8 @@ def run_simulation(
                     card_logs,
                     current_date,
                     config,
+                    rating_estimator,
+                    time_estimator,
                 )
                 current_date += timedelta(days=1)
 

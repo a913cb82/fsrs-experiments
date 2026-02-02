@@ -3,7 +3,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fsrs import Card, Rating, ReviewLog
+from fsrs import Card, Rating, ReviewLog, Scheduler
 from fsrs.scheduler import DEFAULT_PARAMETERS
 
 import src.simulate_fsrs
@@ -18,7 +18,10 @@ from src.simulate_fsrs import (
     RustOptimizer,
     run_simulation,
 )
-from src.simulation_config import RatingWeights, SeededData, SimulationConfig
+from src.simulation_config import (
+    SeededData,
+    SimulationConfig,
+)
 from src.utils import get_retention_for_day, parse_parameters, parse_retention_schedule
 
 
@@ -144,8 +147,7 @@ def test_load_anki_history_missing_file() -> None:
     assert date == START_DATE
 
 
-def test_run_simulation_with_custom_weights() -> None:
-    weights = RatingWeights(first=[0.1, 0.1, 0.7, 0.1], success=[0.1, 0.8, 0.1])
+def test_run_simulation_with_seeded_data_no_weights() -> None:
     config = SimulationConfig(n_days=5, review_limit=10, verbose=False)
     fitted, _, metrics = run_simulation(
         config,
@@ -154,7 +156,6 @@ def test_run_simulation_with_custom_weights() -> None:
             true_cards={},
             sys_cards={},
             logs=defaultdict(list),
-            weights=weights,
         ),
     )
     assert fitted is not None
@@ -162,7 +163,11 @@ def test_run_simulation_with_custom_weights() -> None:
 
 
 def test_run_simulation_with_rating_estimator() -> None:
-    def rating_estimator(card: Card, current_date: datetime) -> int:
+    def rating_estimator(
+        true_card: Card,
+        current_date: datetime,
+        nature_scheduler: Scheduler,
+    ) -> int:
         return 4  # Always 'Easy'
 
     config = SimulationConfig(
@@ -177,6 +182,36 @@ def test_run_simulation_with_rating_estimator() -> None:
     assert metrics["review_count"] > 0
     for log in metrics["logs"]:
         assert log.rating == Rating.Easy
+
+
+def test_run_simulation_with_time_estimator() -> None:
+    def time_estimator(
+        true_card: Card,
+        current_date: datetime,
+        rating: int,
+        nature_scheduler: Scheduler,
+    ) -> float:
+        return 5.0  # Always 5 seconds
+
+    config = SimulationConfig(
+        n_days=5,
+        review_limit=20,
+        new_limit=10,
+        time_estimator=time_estimator,
+        verbose=False,
+    )
+    _, _, metrics = run_simulation(config)
+
+    assert metrics["review_count"] > 0
+
+    config_with_limit = SimulationConfig(
+        n_days=1,
+        time_limit=11.0,
+        time_estimator=time_estimator,
+        verbose=False,
+    )
+    _, _, metrics_limit = run_simulation(config_with_limit)
+    assert metrics_limit["review_count"] == 2
 
 
 def test_get_review_history_stats() -> None:
@@ -347,7 +382,9 @@ def test_parse_parameters_wrong_length() -> None:
 
 
 def test_simulate_day_time_limit_at_start_of_iter() -> None:
-    def time_estimator(card: Any, rating: Any, current_date: Any) -> float:
+    def time_estimator(
+        true_card: Card, date: datetime, rating: int, nature_scheduler: Scheduler
+    ) -> float:
         return 100.0
 
     now = datetime.now(timezone.utc)

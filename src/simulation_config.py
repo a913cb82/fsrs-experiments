@@ -1,14 +1,13 @@
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeAlias
 
-from fsrs import Card, ReviewLog
+from fsrs import Card, ReviewLog, Scheduler
 
-
-@dataclass
-class RatingWeights:
-    first: list[float] = field(default_factory=lambda: [0.5, 0.1, 0.3, 0.1])
-    success: list[float] = field(default_factory=lambda: [0.1, 0.8, 0.1])
+# Simple Callable types for estimators
+RatingEstimator: TypeAlias = Callable[[Card, datetime, Scheduler], int]
+TimeEstimator: TypeAlias = Callable[[Card, datetime, int, Scheduler], float]
 
 
 @dataclass
@@ -17,7 +16,6 @@ class SeededData:
     last_rev: datetime
     true_cards: dict[int, Card]
     sys_cards: dict[int, Card]
-    weights: RatingWeights | None = None
 
 
 @dataclass
@@ -29,7 +27,6 @@ class SimulationConfig:
     retention: str = "0.9"
     seed: int = 42
     time_limit: float | None = None
-    time_estimator: Callable[[Card, int, datetime], float] | None = None
-    rating_estimator: Callable[[Card, datetime], int] | None = None
-    weights: RatingWeights = field(default_factory=RatingWeights)
+    time_estimator: TimeEstimator | None = None
+    rating_estimator: RatingEstimator | None = None
     verbose: bool = True
