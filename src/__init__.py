@@ -6,8 +6,10 @@ from .anki_utils import (
     infer_review_weights as infer_review_weights,
     load_anki_history as load_anki_history,
 )
-from .simulate_fsrs import (
+from .optimizer import (
     RustOptimizer as RustOptimizer,
+)
+from .simulate_fsrs import (
     run_simulation as run_simulation,
 )
 from .simulation_config import (

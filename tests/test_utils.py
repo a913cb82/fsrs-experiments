@@ -2,10 +2,12 @@ import numpy as np
 from fsrs.scheduler import DEFAULT_PARAMETERS
 
 from src.anki_utils import (
+    infer_review_weights,
+)
+from src.proto_utils import (
     decode_varint,
     get_deck_config_id,
     get_field_from_proto,
-    infer_review_weights,
 )
 from src.utils import (
     calculate_metrics,

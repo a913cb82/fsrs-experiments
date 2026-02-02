@@ -9,13 +9,12 @@ from fsrs.scheduler import DEFAULT_PARAMETERS
 import src.simulate_fsrs
 from src.anki_utils import (
     START_DATE,
-    get_deck_config_id,
-    get_field_from_proto,
     get_review_history_stats,
     load_anki_history,
 )
+from src.optimizer import RustOptimizer
+from src.proto_utils import get_deck_config_id, get_field_from_proto
 from src.simulate_fsrs import (
-    RustOptimizer,
     run_simulation,
 )
 from src.simulation_config import (
@@ -43,6 +42,7 @@ def test_rust_optimizer() -> None:
     ]
     opt = RustOptimizer(logs)
     params = opt.compute_optimal_parameters()
+    assert params is not None
     assert len(params) == 21
     assert any(p != 0 for p in params)
 
@@ -59,7 +59,7 @@ def test_rust_optimizer_no_items() -> None:
     ]
     opt = RustOptimizer(logs)
     params = opt.compute_optimal_parameters()
-    assert len(params) == 21
+    assert params is None
 
 
 def test_run_simulation_basic() -> None:
@@ -127,13 +127,14 @@ def test_simulate_day_review_limit_break() -> None:
     test_db = "tests/test_collection.anki2"
     config = SimulationConfig(n_days=100, review_limit=1, verbose=False)
     _, _, metrics = run_simulation(config, seed_history=test_db)
+    # Expected: 5 initial reviews + 100 simulated reviews = 105 total
     assert metrics["review_count"] == 105
 
 
 def test_run_simulation_no_optimizer_triggered() -> None:
     config = SimulationConfig(n_days=1, review_limit=10, verbose=False)
     fitted, _, _ = run_simulation(config)
-    assert fitted is not None
+    assert fitted is None
 
 
 def test_parse_retention_schedule_error() -> None:
@@ -402,7 +403,7 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
 
 
 def test_decode_varint_multi_byte() -> None:
-    from src.anki_utils import decode_varint
+    from src.proto_utils import decode_varint
 
     res, pos = decode_varint(bytes([0x80, 0x01]), 0)
     assert res == 128
@@ -417,7 +418,7 @@ def test_run_simulation_triggers_patched_tqdm_more(monkeypatch: Any) -> None:
         return list(DEFAULT_PARAMETERS)
 
     monkeypatch.setattr(
-        src.simulate_fsrs.RustOptimizer,
+        src.optimizer.RustOptimizer,
         "compute_optimal_parameters",
         mock_compute_optimal,
     )
@@ -426,11 +427,13 @@ def test_run_simulation_triggers_patched_tqdm_more(monkeypatch: Any) -> None:
 
 
 def test_run_simulation_no_fitted_params(monkeypatch: Any) -> None:
+    import src.optimizer
+
     def mock_compute(*args: Any, **kwargs: Any) -> Any:
-        raise Exception("Fitting failed")
+        return None
 
     monkeypatch.setattr(
-        src.simulate_fsrs.RustOptimizer, "compute_optimal_parameters", mock_compute
+        src.optimizer.RustOptimizer, "compute_optimal_parameters", mock_compute
     )
     config = SimulationConfig(n_days=1, verbose=False)
     fitted, _, metrics = run_simulation(config)
