@@ -290,9 +290,9 @@ def run_simulation(
         else:
             current_date = START_DATE
 
-        limit_phase_1 = (
-            config.burn_in_days if config.burn_in_days > 0 else config.n_days
-        )
+        limit_phase_1 = config.n_days
+        if 0 < config.burn_in_days < config.n_days:
+            limit_phase_1 = config.burn_in_days
         pbar_p1 = tqdm(
             range(limit_phase_1),
             desc="Simulating (P1)",

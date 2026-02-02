@@ -81,29 +81,29 @@ def create_test_db(path: str) -> None:
     # Card 1 (Default deck) reviews
     cur.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, "
-        "time, type) VALUES (?, 1, 0, 3, 0, 0, 0, 0, 0)",
+        "time, type) VALUES (?, 1, 0, 3, 0, 0, 0, 5000, 0)",
         (now_ms - 86400000 * 10,),
     )
     cur.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, "
-        "time, type) VALUES (?, 1, 0, 3, 0, 0, 0, 0, 2)",
+        "time, type) VALUES (?, 1, 0, 3, 0, 0, 0, 6000, 2)",
         (now_ms - 86400000 * 5,),
     )
 
     # Card 2 (TestDeck) reviews
     cur.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, "
-        "time, type) VALUES (?, 2, 0, 3, 0, 0, 0, 0, 0)",
+        "time, type) VALUES (?, 2, 0, 3, 0, 0, 0, 7000, 0)",
         (now_ms - 86400000 * 20,),
     )
     cur.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, "
-        "time, type) VALUES (?, 2, 0, 1, 0, 0, 0, 0, 2)",
+        "time, type) VALUES (?, 2, 0, 1, 0, 0, 0, 8000, 2)",
         (now_ms - 86400000 * 15,),
     )
     cur.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, "
-        "time, type) VALUES (?, 2, 0, 3, 0, 0, 0, 0, 3)",
+        "time, type) VALUES (?, 2, 0, 3, 0, 0, 0, 9000, 3)",
         (now_ms - 86400000 * 10 + 1000,),
     )
 
