@@ -1,5 +1,6 @@
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any
@@ -34,28 +35,68 @@ except ImportError:
     sys.exit("Error: fsrs package not found. Please install it.")
 
 
-def _process_review(
-    card: Card,
-    true_card: Card,
+def _batch_process_reviews(
+    sys_cards_batch: Sequence[Card],
+    true_cards_batch: Sequence[Card],
     nature_scheduler: Scheduler,
     algo_scheduler: Scheduler,
     current_date: datetime,
     rating_estimator: RatingEstimator,
     time_estimator: TimeEstimator,
-) -> tuple[Card, Card, ReviewLog, float]:
-    rating_val = rating_estimator(
-        true_card,
-        current_date,
-        nature_scheduler,
+    card_logs: dict[int, list[ReviewLog]],
+    start_time_accumulated: float,
+    time_limit: float | None,
+) -> tuple[int, float, list[Card], list[Card]]:
+    """
+    Process a batch of reviews.
+    Returns:
+        reviews_done: Number of reviews actually completed (due to time limit)
+        new_time_accumulated: Updated time
+        updated_sys_cards: List of updated system cards (length = reviews_done)
+        updated_true_cards: List of updated true cards (length = reviews_done)
+    """
+    if not sys_cards_batch:
+        return 0, start_time_accumulated, [], []
+
+    # 1. Predict Ratings (Batch)
+    ratings_vals = rating_estimator(true_cards_batch, current_date, nature_scheduler)
+
+    # 2. Predict Times (Batch)
+    times_vals = time_estimator(
+        true_cards_batch, current_date, ratings_vals, nature_scheduler
     )
-    rating = Rating(rating_val)
 
-    review_time = time_estimator(true_card, current_date, int(rating), nature_scheduler)
+    current_accumulated = start_time_accumulated
+    reviews_done = 0
+    updated_sys_cards = []
+    updated_true_cards = []
 
-    updated_true_card, _ = nature_scheduler.review_card(true_card, rating, current_date)
-    updated_card, log = algo_scheduler.review_card(card, rating, current_date)
+    for i in range(len(sys_cards_batch)):
+        sys_card = sys_cards_batch[i]
+        true_card = true_cards_batch[i]
+        r_val = ratings_vals[i]
+        t_val = times_vals[i]
 
-    return updated_card, updated_true_card, log, review_time
+        # Check time limit
+        if time_limit is not None and current_accumulated + t_val > time_limit:
+            break
+
+        current_accumulated += t_val
+        reviews_done += 1
+
+        rating = Rating(r_val)
+        updated_true_card, _ = nature_scheduler.review_card(
+            true_card, rating, current_date
+        )
+        updated_sys_card, log = algo_scheduler.review_card(
+            sys_card, rating, current_date
+        )
+
+        card_logs[updated_sys_card.card_id].append(log)
+        updated_sys_cards.append(updated_sys_card)
+        updated_true_cards.append(updated_true_card)
+
+    return reviews_done, current_accumulated, updated_sys_cards, updated_true_cards
 
 
 def simulate_day(
@@ -68,86 +109,113 @@ def simulate_day(
     config: SimulationConfig,
     rating_estimator: RatingEstimator,
     time_estimator: TimeEstimator,
-) -> None:
+    next_card_id: int,
+) -> int:
     # Use NumPy for fast due-check across the deck
     dues = np.array([c.due for c in sys_cards])
     due_mask = dues <= current_date
     due_indices = np.where(due_mask)[0].tolist()
 
-    # Sort indices to keep deterministic if needed (NumPy where is stable)
+    # Sort indices to keep deterministic if needed
     due_indices = sorted(due_indices)
     random.shuffle(due_indices)
-    reviews_done = 0
-    time_accumulated = 0.0
 
-    # Due cards
-    for idx in due_indices:
-        if config.time_limit is not None and time_accumulated >= config.time_limit:
-            break
-        if config.review_limit is not None and reviews_done >= config.review_limit:
-            break
+    # 1. Due Cards Processing
 
-        sys_card, true_card, log, review_time = _process_review(
-            sys_cards[idx],
-            true_cards[idx],
-            nature_scheduler,
-            algo_scheduler,
-            current_date,
-            rating_estimator,
-            time_estimator,
+    # Select candidates based on review limit
+    candidate_indices = due_indices
+    if config.review_limit is not None:
+        candidate_indices = due_indices[: config.review_limit]
+
+    if candidate_indices:
+        batch_sys = [sys_cards[i] for i in candidate_indices]
+        batch_true = [true_cards[i] for i in candidate_indices]
+
+        reviews_done, time_accumulated, updated_sys, updated_true = (
+            _batch_process_reviews(
+                batch_sys,
+                batch_true,
+                nature_scheduler,
+                algo_scheduler,
+                current_date,
+                rating_estimator,
+                time_estimator,
+                card_logs,
+                start_time_accumulated=0.0,
+                time_limit=config.time_limit,
+            )
         )
 
-        if (
-            config.time_limit is not None
-            and time_accumulated + review_time > config.time_limit
-        ):
-            break
+        # Update the cards in the main lists
+        for k, idx in enumerate(candidate_indices[:reviews_done]):
+            sys_cards[idx] = updated_sys[k]
+            true_cards[idx] = updated_true[k]
+    else:
+        reviews_done = 0
+        time_accumulated = 0.0
 
-        time_accumulated += review_time
-        sys_cards[idx] = sys_card
-        true_cards[idx] = true_card
-        card_logs[sys_card.card_id].append(log)
-        reviews_done += 1
-
-    # New cards
+    # 2. New Cards Processing
+    # Process new cards in chunks to respect time limits and avoid over-allocation
     new_done = 0
+    new_batch_size = 50
+
     while True:
+        # Check global stopping conditions
         if config.time_limit is not None and time_accumulated >= config.time_limit:
             break
-        if config.review_limit is not None and reviews_done >= config.review_limit:
-            break
-        if config.new_limit is not None and new_done >= config.new_limit:
-            break
 
-        # For new cards, we determine rating first to see if it's Again/Success
-        rating_val = rating_estimator(
-            Card(),
-            current_date,
-            nature_scheduler,
+        remaining_total_reviews = (
+            (config.review_limit - reviews_done)
+            if config.review_limit is not None
+            else 999999
         )
-        rating = Rating(rating_val)
-
-        review_time = time_estimator(
-            Card(), current_date, int(rating), nature_scheduler
+        remaining_new_cards = (
+            (config.new_limit - new_done) if config.new_limit is not None else 999999
         )
 
-        if (
-            config.time_limit is not None
-            and time_accumulated + review_time > config.time_limit
-        ):
+        # We stop if we hit review limit or new card limit
+        if remaining_total_reviews <= 0 or remaining_new_cards <= 0:
             break
 
-        time_accumulated += review_time
-        updated_true_card, _ = nature_scheduler.review_card(
-            Card(), rating, current_date
-        )
-        updated_sys_card, log = algo_scheduler.review_card(Card(), rating, current_date)
+        # Determine batch size for this iteration
+        batch_size = min(new_batch_size, remaining_total_reviews, remaining_new_cards)
 
-        true_cards.append(updated_true_card)
-        sys_cards.append(updated_sys_card)
-        card_logs[updated_sys_card.card_id].append(log)
-        reviews_done += 1
-        new_done += 1
+        # Generate IDs and Cards
+        new_ids = list(range(next_card_id, next_card_id + batch_size))
+        next_card_id += batch_size
+
+        new_batch_sys = [Card(card_id=uid) for uid in new_ids]
+        new_batch_true = [Card(card_id=uid) for uid in new_ids]
+
+        # Process this batch
+        batch_completed, time_accumulated, updated_sys, updated_true = (
+            _batch_process_reviews(
+                new_batch_sys,
+                new_batch_true,
+                nature_scheduler,
+                algo_scheduler,
+                current_date,
+                rating_estimator,
+                time_estimator,
+                card_logs,
+                start_time_accumulated=time_accumulated,
+                time_limit=config.time_limit,
+            )
+        )
+
+        # Update counters
+        reviews_done += batch_completed
+        new_done += batch_completed
+
+        # Add processed cards to deck
+        true_cards.extend(updated_true)
+        sys_cards.extend(updated_sys)
+
+        # If batch is incomplete, we hit the time limit
+        if batch_completed < batch_size:
+            break
+
+    return next_card_id
 
 
 def _load_initial_state(
@@ -191,28 +259,35 @@ def _initialize_estimators(
         weights = infer_review_weights(card_logs)
 
         def default_rating_est(
-            true_card: Card, date: datetime, nature_scheduler: Scheduler
-        ) -> int:
-            if true_card.stability is not None and true_card.stability > 0:
-                retrievability = nature_scheduler.get_card_retrievability(
-                    true_card, date
-                )
-                if random.random() < retrievability:
-                    return int(
-                        random.choices(
-                            [Rating.Hard, Rating.Good, Rating.Easy],
-                            weights=weights.success,
-                        )[0]
+            true_cards: Sequence[Card], date: datetime, nature_scheduler: Scheduler
+        ) -> Sequence[int]:
+            results = []
+            for true_card in true_cards:
+                if true_card.stability is not None and true_card.stability > 0:
+                    retrievability = nature_scheduler.get_card_retrievability(
+                        true_card, date
                     )
+                    if random.random() < retrievability:
+                        results.append(
+                            int(
+                                random.choices(
+                                    [Rating.Hard, Rating.Good, Rating.Easy],
+                                    weights=weights.success,
+                                )[0]
+                            )
+                        )
+                    else:
+                        results.append(int(Rating.Again))
                 else:
-                    return int(Rating.Again)
-            else:
-                return int(
-                    random.choices(
-                        [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-                        weights=weights.first,
-                    )[0]
-                )
+                    results.append(
+                        int(
+                            random.choices(
+                                [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
+                                weights=weights.first,
+                            )[0]
+                        )
+                    )
+            return results
 
         rating_estimator = default_rating_est
 
@@ -231,9 +306,12 @@ def _initialize_estimators(
             avg_durations[int(r)] = float(np.mean(durs)) if durs else 0.0
 
         def default_time_est(
-            true_card: Card, date: datetime, rating: int, nature_scheduler: Scheduler
-        ) -> float:
-            return avg_durations.get(rating, 0.0)
+            true_cards: Sequence[Card],
+            date: datetime,
+            ratings: Sequence[int],
+            nature_scheduler: Scheduler,
+        ) -> Sequence[float]:
+            return [avg_durations.get(r, 0.0) for r in ratings]
 
         time_estimator = default_time_est
 
@@ -334,6 +412,13 @@ def run_simulation(
 
         rating_estimator, time_estimator = _initialize_estimators(config, card_logs)
 
+        # Initialize next_card_id to avoid sleep in Card() constructor
+        if sys_cards:
+            max_id = max(c.card_id for c in sys_cards)
+            next_card_id = max_id + 1
+        else:
+            next_card_id = int(datetime.now().timestamp() * 1000)
+
         # Simulation Phases
         if 0 < config.burn_in_days < config.n_days:
             phases = [
@@ -355,7 +440,7 @@ def run_simulation(
             for day in pbar:
                 daily_retention = get_retention_for_day(day, parsed_schedule)
                 algo_scheduler.desired_retention = daily_retention
-                simulate_day(
+                next_card_id = simulate_day(
                     nature_scheduler,
                     algo_scheduler,
                     true_cards,
@@ -365,6 +450,7 @@ def run_simulation(
                     config,
                     rating_estimator,
                     time_estimator,
+                    next_card_id,
                 )
                 current_date += timedelta(days=1)
 

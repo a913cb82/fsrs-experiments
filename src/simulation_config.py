@@ -1,13 +1,18 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TypeAlias
 
 from fsrs import Card, ReviewLog, Scheduler
 
-# Simple Callable types for estimators
-RatingEstimator: TypeAlias = Callable[[Card, datetime, Scheduler], int]
-TimeEstimator: TypeAlias = Callable[[Card, datetime, int, Scheduler], float]
+# Batch Estimator types
+# Takes a list of Cards and returns a list of results
+RatingEstimator: TypeAlias = Callable[
+    [Sequence[Card], datetime, Scheduler], Sequence[int]
+]
+TimeEstimator: TypeAlias = Callable[
+    [Sequence[Card], datetime, Sequence[int], Scheduler], Sequence[float]
+]
 
 
 @dataclass

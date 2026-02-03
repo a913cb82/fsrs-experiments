@@ -1,5 +1,6 @@
 import sqlite3
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -165,11 +166,11 @@ def test_run_simulation_with_seeded_data_no_weights() -> None:
 
 def test_run_simulation_with_rating_estimator() -> None:
     def rating_estimator(
-        true_card: Card,
+        true_cards: Sequence[Card],
         current_date: datetime,
         nature_scheduler: Scheduler,
-    ) -> int:
-        return 4  # Always 'Easy'
+    ) -> Sequence[int]:
+        return [4] * len(true_cards)  # Always 'Easy'
 
     config = SimulationConfig(
         n_days=5,
@@ -187,12 +188,12 @@ def test_run_simulation_with_rating_estimator() -> None:
 
 def test_run_simulation_with_time_estimator() -> None:
     def time_estimator(
-        true_card: Card,
+        true_cards: Sequence[Card],
         current_date: datetime,
-        rating: int,
+        ratings: Sequence[int],
         nature_scheduler: Scheduler,
-    ) -> float:
-        return 5.0  # Always 5 seconds
+    ) -> Sequence[float]:
+        return [5.0] * len(true_cards)  # Always 5 seconds
 
     config = SimulationConfig(
         n_days=5,
@@ -384,9 +385,12 @@ def test_parse_parameters_wrong_length() -> None:
 
 def test_simulate_day_time_limit_at_start_of_iter() -> None:
     def time_estimator(
-        true_card: Card, date: datetime, rating: int, nature_scheduler: Scheduler
-    ) -> float:
-        return 100.0
+        true_cards: Sequence[Card],
+        date: datetime,
+        ratings: Sequence[int],
+        nature_scheduler: Scheduler,
+    ) -> Sequence[float]:
+        return [100.0] * len(true_cards)
 
     now = datetime.now(timezone.utc)
     seeded_data = SeededData(
