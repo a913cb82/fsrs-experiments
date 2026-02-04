@@ -1,12 +1,14 @@
 import json
+import math
 import os
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 
-from fsrs import Card, Rating, ReviewLog, Scheduler
+import pandas as pd
+from fsrs import Card, Rating, Scheduler
 from tqdm import tqdm
 
 from proto_utils import get_deck_config_id
@@ -38,8 +40,6 @@ def calculate_expected_d0(weights: list[float], parameters: tuple[float, ...]) -
     distribution and FSRS v6 parameters w4, w5.
     Formula: D0(G) = w4 - exp(w5*(G-1)) + 1
     """
-    import math
-
     w4 = parameters[4]
     w5 = parameters[5]
     # G values: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
@@ -197,14 +197,15 @@ def load_anki_history(
     path: str,
     deck_config_name: str | None = None,
     deck_name: str | None = None,
-) -> tuple[dict[int, list[ReviewLog]], datetime]:
+) -> tuple[pd.DataFrame, datetime]:
     """
     Extracts FSRS-compatible review logs from an Anki collection.anki2 file.
     Supports both old (JSON-in-col) and new (relational tables) schemas.
+    Returns a DataFrame with columns: card_id, rating, review_datetime, review_duration
     """
     if not os.path.exists(path):
         tqdm.write(f"Error: Anki database not found at {path}")
-        return {}, START_DATE
+        return pd.DataFrame(), START_DATE
 
     conn = sqlite3.connect(path)
     cur = conn.cursor()
@@ -222,7 +223,7 @@ def load_anki_history(
 
         if not valid_deck_ids:
             tqdm.write("Warning: No matching decks found for filtering criteria.")
-            return {}, START_DATE
+            return pd.DataFrame(), START_DATE
 
         tqdm.write(f"Querying reviews for {len(valid_deck_ids)} matching decks...")
         placeholders = ",".join(["?" for _ in valid_deck_ids])
@@ -238,71 +239,66 @@ def load_anki_history(
         rows = cur.fetchall()
     except (sqlite3.OperationalError, json.JSONDecodeError) as e:
         tqdm.write(f"Error reading Anki database: {e}")
-        return {}, START_DATE
+        return pd.DataFrame(), START_DATE
     finally:
         conn.close()
 
-    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
-    first_review_time = None
-    last_review_time = START_DATE
+    if not rows:
+        return pd.DataFrame(), START_DATE
 
-    for cid_v, ease, rev_id, _rev_type, duration_ms in rows:
-        cid = int(cid_v)
-        dt = datetime.fromtimestamp(rev_id / 1000.0, tz=timezone.utc)
-        log = ReviewLog(
-            card_id=cid,
-            rating=Rating(ease),
-            review_datetime=dt,
-            review_duration=int(duration_ms) if duration_ms else None,
-        )
-        card_logs[cid].append(log)
-        if first_review_time is None or dt < first_review_time:
-            first_review_time = dt
-        if dt > last_review_time:
-            last_review_time = dt
+    df = pd.DataFrame(
+        rows, columns=["card_id", "rating", "id", "type", "review_duration"]
+    )
+    df["review_datetime"] = pd.to_datetime(df["id"], unit="ms", utc=True)
+    df["rating"] = df["rating"].astype(int)
+    # duration can be None if duration_ms is 0 or null
+    df["review_duration"] = df["review_duration"].apply(lambda x: int(x) if x else None)
 
-    total_revs = len(rows)
-    tqdm.write(f"Successfully loaded {total_revs} reviews for {len(card_logs)} cards.")
-    if first_review_time is not None:
-        tqdm.write(
-            f"Review date range: {first_review_time.date()} to "
-            f"{last_review_time.date()}"
-        )
+    last_review_time = df["review_datetime"].max()
+    first_review_time = df["review_datetime"].min()
 
-    return card_logs, last_review_time
+    t_df = df[["card_id", "rating", "review_datetime", "review_duration"]]
+
+    tqdm.write(
+        f"Successfully loaded {len(df)} reviews for {df['card_id'].nunique()} cards."
+    )
+    tqdm.write(
+        f"Review date range: {first_review_time.date()} to {last_review_time.date()}"
+    )
+
+    return t_df, last_review_time
 
 
 def infer_review_weights(
-    card_logs: dict[int, list[ReviewLog]],
+    card_logs: pd.DataFrame,
 ) -> RatingWeights:
     """
     Infers rating probabilities from real review history.
-    Returns RatingWeights for first reviews and subsequent successful reviews.
+    card_logs is a DataFrame with [card_id, rating, review_datetime]
     """
-    first_ratings = [0, 0, 0, 0]  # Again, Hard, Good, Easy
-    success_ratings = [0, 0, 0]  # Hard, Good, Easy
+    if card_logs.empty:
+        return RatingWeights()
 
-    for logs in card_logs.values():
-        if not logs:
-            continue
-        # Sort logs by time
-        sorted_logs = sorted(logs, key=lambda x: x.review_datetime)
+    sorted_df = card_logs.sort_values("review_datetime").copy()
+    sorted_df["rank"] = sorted_df.groupby("card_id")["review_datetime"].rank(
+        method="first"
+    )
 
-        # First review
-        first_r = int(sorted_logs[0].rating)
-        if 1 <= first_r <= 4:
-            first_ratings[first_r - 1] += 1
+    first_reviews = sorted_df[sorted_df["rank"] == 1]
+    subsequent_reviews = sorted_df[sorted_df["rank"] > 1]
 
-        # Subsequent reviews
-        for log in sorted_logs[1:]:
-            r = int(log.rating)
-            if 2 <= r <= 4:  # Success branch (recalled)
-                success_ratings[r - 2] += 1
+    first_ratings_counts = (
+        first_reviews["rating"].value_counts().reindex([1, 2, 3, 4], fill_value=0)
+    )
+    success_subsequent = subsequent_reviews[subsequent_reviews["rating"] > 1]
+    success_ratings_counts = (
+        success_subsequent["rating"].value_counts().reindex([2, 3, 4], fill_value=0)
+    )
 
     # Normalize First Ratings
-    total_first = sum(first_ratings)
+    total_first = first_ratings_counts.sum()
     if total_first > 0:
-        first_weights = [r / total_first for r in first_ratings]
+        first_weights = (first_ratings_counts / total_first).tolist()
     else:
         first_weights = [
             DEFAULT_PROB_FIRST_AGAIN,
@@ -312,9 +308,9 @@ def infer_review_weights(
         ]
 
     # Normalize Success Ratings
-    total_success = sum(success_ratings)
+    total_success = success_ratings_counts.sum()
     if total_success > 0:
-        success_weights = [r / total_success for r in success_ratings]
+        success_weights = (success_ratings_counts / total_success).tolist()
     else:
         success_weights = [
             DEFAULT_PROB_HARD,
@@ -326,7 +322,7 @@ def infer_review_weights(
 
 
 def get_review_history_stats(
-    card_logs: dict[int, list[ReviewLog]],
+    card_logs: pd.DataFrame,
     parameters: tuple[float, ...],
 ) -> list[dict[str, Any]]:
     """
@@ -344,15 +340,12 @@ def get_review_history_stats(
 
     stats = []
 
-    for cid, logs in card_logs.items():
-        if not logs:
-            continue
-
-        sorted_logs = sorted(logs, key=lambda x: x.review_datetime)
+    for cid, group in card_logs.groupby("card_id"):
+        sorted_group = group.sort_values("review_datetime")
 
         card = Card(card_id=cid)
         # Replay history
-        for i, log in enumerate(sorted_logs):
+        for i, row in enumerate(sorted_group.itertuples()):
             if i == 0:
                 # Features for a BRAND NEW card
                 ret = prob_first_success
@@ -361,19 +354,19 @@ def get_review_history_stats(
                 elapsed = 0.0
             else:
                 # Retention at the time of THIS review
-                ret = scheduler.get_card_retrievability(card, log.review_datetime)
+                ret = scheduler.get_card_retrievability(card, row.review_datetime)
                 stab = card.stability
                 diff = card.difficulty
                 elapsed = (
-                    log.review_datetime - card.last_review
+                    row.review_datetime - card.last_review
                 ).total_seconds() / 86400.0
 
             stats.append(
                 {
                     "card_id": cid,
                     "retention": ret,
-                    "rating": int(log.rating),
-                    "duration": log.review_duration,
+                    "rating": int(cast(Any, row).rating),
+                    "duration": row.review_duration,
                     "stability": stab,
                     "difficulty": diff,
                     "elapsed_days": elapsed,
@@ -381,6 +374,8 @@ def get_review_history_stats(
             )
 
             # Update card state for the NEXT review
-            card, _ = scheduler.review_card(card, log.rating, log.review_datetime)
+            card, _ = scheduler.review_card(
+                card, Rating(int(cast(Any, row).rating)), row.review_datetime
+            )
 
     return stats

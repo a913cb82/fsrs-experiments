@@ -1,9 +1,9 @@
 import sqlite3
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from fsrs import Card, Rating, ReviewLog
 from fsrs.scheduler import DEFAULT_PARAMETERS
 
@@ -75,19 +75,21 @@ def test_run_simulation_basic() -> None:
 
 def test_run_simulation_with_seeded_data() -> None:
     now = datetime.now(timezone.utc)
-    logs: dict[int, list[ReviewLog]] = defaultdict(list)
-    log = ReviewLog(
-        card_id=1,
-        rating=Rating.Good,
-        review_datetime=now - timedelta(days=1),
-        review_duration=None,
+    logs_df = pd.DataFrame(
+        [
+            {
+                "card_id": 1,
+                "rating": int(Rating.Good),
+                "review_datetime": now - timedelta(days=1),
+                "review_duration": None,
+            }
+        ]
     )
-    logs[1] = [log]
     true_cards = {1: Card(card_id=1, due=now)}
     sys_cards = {1: Card(card_id=1, due=now)}
 
     seeded_payload = SeededData(
-        logs=logs,
+        logs=logs_df,
         last_rev=now - timedelta(days=1),
         true_cards=true_cards,
         sys_cards=sys_cards,
@@ -128,7 +130,7 @@ def test_simulate_day_review_limit_break() -> None:
     test_db = "tests/test_collection.anki2"
     config = SimulationConfig(n_days=100, review_limit=1, verbose=False)
     _, _, metrics = run_simulation(config, seed_history=test_db)
-    # Expected: 5 initial reviews + 100 simulated reviews = 105 total
+    # 5 initial + 100 simulated
     assert metrics["review_count"] == 105
 
 
@@ -145,7 +147,7 @@ def test_parse_retention_schedule_error() -> None:
 
 def test_load_anki_history_missing_file() -> None:
     logs, date = load_anki_history("non_existent.anki2")
-    assert logs == {}
+    assert logs.empty
     assert date == START_DATE
 
 
@@ -157,7 +159,7 @@ def test_run_simulation_with_seeded_data_no_weights() -> None:
             last_rev=datetime.now(timezone.utc),
             true_cards={},
             sys_cards={},
-            logs=defaultdict(list),
+            logs=pd.DataFrame(),
         ),
     )
     assert fitted is not None
@@ -222,23 +224,23 @@ def test_run_simulation_with_time_estimator() -> None:
 
 def test_get_review_history_stats() -> None:
     now = datetime.now(timezone.utc)
-    logs = {
-        1: [
-            ReviewLog(
-                card_id=1,
-                rating=Rating.Good,
-                review_datetime=now - timedelta(days=10),
-                review_duration=5000,
-            ),
-            ReviewLog(
-                card_id=1,
-                rating=Rating.Good,
-                review_datetime=now - timedelta(days=5),
-                review_duration=10000,
-            ),
+    logs_df = pd.DataFrame(
+        [
+            {
+                "card_id": 1,
+                "rating": int(Rating.Good),
+                "review_datetime": now - timedelta(days=10),
+                "review_duration": 5000,
+            },
+            {
+                "card_id": 1,
+                "rating": int(Rating.Good),
+                "review_datetime": now - timedelta(days=5),
+                "review_duration": 10000,
+            },
         ]
-    }
-    stats = get_review_history_stats(logs, DEFAULT_PARAMETERS)
+    )
+    stats = get_review_history_stats(logs_df, DEFAULT_PARAMETERS)
     assert len(stats) == 2
     assert stats[0]["elapsed_days"] == 0.0
     assert stats[1]["elapsed_days"] == 5.0
@@ -323,7 +325,7 @@ def test_load_anki_history_none_rows(tmp_path: Any) -> None:
     conn.commit()
     conn.close()
     logs, _ = load_anki_history(db_path)
-    assert logs == {}
+    assert logs.empty
 
 
 def test_load_anki_history_empty_col(tmp_path: Any) -> None:
@@ -334,7 +336,7 @@ def test_load_anki_history_empty_col(tmp_path: Any) -> None:
     conn.commit()
     conn.close()
     logs, _ = load_anki_history(db_path)
-    assert logs == {}
+    assert logs.empty
 
 
 def test_load_anki_history_old_empty_col(tmp_path: Any) -> None:
@@ -347,7 +349,7 @@ def test_load_anki_history_old_empty_col(tmp_path: Any) -> None:
     conn.commit()
     conn.close()
     logs, _ = load_anki_history(db_path)
-    assert logs == {}
+    assert logs.empty
 
 
 def test_load_anki_history_no_ver(tmp_path: Any) -> None:
@@ -359,7 +361,7 @@ def test_load_anki_history_no_ver(tmp_path: Any) -> None:
     conn.close()
 
     logs, date = load_anki_history(db_path)
-    assert logs == {}
+    assert logs.empty
     assert date == START_DATE
 
 
@@ -400,7 +402,7 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
 
     now = datetime.now(timezone.utc)
     seeded_data = SeededData(
-        logs=defaultdict(list),
+        logs=pd.DataFrame(),
         last_rev=now - timedelta(days=1),
         true_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
         sys_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},

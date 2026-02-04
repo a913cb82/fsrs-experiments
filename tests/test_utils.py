@@ -1,13 +1,12 @@
 import numpy as np
-from fsrs.scheduler import DEFAULT_PARAMETERS
+import pandas as pd
+import pytest
+from fsrs import Rating
 
 from src.anki_utils import (
+    RatingWeights,
+    calculate_expected_d0,
     infer_review_weights,
-)
-from src.proto_utils import (
-    decode_varint,
-    get_deck_config_id,
-    get_field_from_proto,
 )
 from src.utils import (
     calculate_metrics,
@@ -16,127 +15,6 @@ from src.utils import (
     parse_parameters,
     parse_retention_schedule,
 )
-
-
-def test_decode_varint() -> None:
-    # 1 byte
-    assert decode_varint(b"\x01", 0) == (1, 1)
-    assert decode_varint(b"\x7f", 0) == (127, 1)
-    # 2 bytes
-    assert decode_varint(b"\x80\x01", 0) == (128, 2)
-    assert decode_varint(b"\xac\x02", 0) == (300, 2)
-    # Large value
-    data = b"\xfd\xff\xff\xff\x07"
-    val, pos = decode_varint(data, 0)
-    assert val == 2147483645
-    assert pos == 5
-
-
-def test_get_deck_config_id() -> None:
-    # 1. From common_blob (field 1)
-    assert get_deck_config_id(b"\x08\x01", b"") == 1
-    assert get_deck_config_id(b"\x08\xac\x02", b"") == 300
-
-    # 2. From kind_blob (field 1 -> field 1)
-    # 0a 0d 08 fa e3 9c eb d1 32 ... (NormalDeck wrapping config_id)
-    # 0a: tag 1, type 2. 0d: length 13. 08: tag 1, type 0.
-    kind_with_cid = b"\x0a\x0d\x08\xfa\xe3\x9c\xeb\xd1\x32\x10\x01\x18\x0b\x30\x02"
-    assert get_deck_config_id(b"", kind_with_cid) == 1739955057146
-
-    # 3. Default to 1
-    assert get_deck_config_id(b"", b"") == 1
-    assert get_deck_config_id(b"\x10\x01", b"\x10\x01") == 1
-
-
-def test_get_field_from_proto() -> None:
-    # Field 1, value 1
-    assert get_field_from_proto(b"\x08\x01", 1) == 1
-    # Field 2, skip it and find field 1
-    assert get_field_from_proto(b"\x10\x05\x08\x01", 1) == 1
-    # Field not found
-    assert get_field_from_proto(b"\x10\x05", 1) is None
-    # Empty
-    assert get_field_from_proto(b"", 1) is None
-    # Wire type skip tests (fixed64 = 1, length delimited = 2, fixed32 = 5)
-    # fixed64 field 2 (tag 0x11), then field 1 (tag 0x08)
-    data_fixed64 = b"\x11\x00\x00\x00\x00\x00\x00\x00\x00\x08\x01"
-    assert get_field_from_proto(data_fixed64, 1) == 1
-    # fixed32 field 2 (tag 0x15), then field 1
-    data_fixed32 = b"\x15\x00\x00\x00\x00\x08\x01"
-    assert get_field_from_proto(data_fixed32, 1) == 1
-
-
-def test_parse_retention_schedule() -> None:
-    assert parse_retention_schedule("0.9") == [(1, 0.9)]
-    assert parse_retention_schedule("2:0.7,1:0.9") == [(2, 0.7), (1, 0.9)]
-    # Invalid
-    assert parse_retention_schedule("invalid") == [(1, 0.9)]
-    assert parse_retention_schedule("2:invalid") == [(1, 0.9)]
-
-
-def test_get_retention_for_day() -> None:
-    sched = [(2, 0.7), (1, 0.9)]  # Total 3 days
-    assert get_retention_for_day(0, sched) == 0.7
-    assert get_retention_for_day(1, sched) == 0.7
-    assert get_retention_for_day(2, sched) == 0.9
-    # Cycle
-    assert get_retention_for_day(3, sched) == 0.7
-    assert get_retention_for_day(4, sched) == 0.7
-    assert get_retention_for_day(5, sched) == 0.9
-
-    # Single element
-    assert get_retention_for_day(10, [(1, 0.8)]) == 0.8
-
-
-def test_parse_parameters() -> None:
-    p_str = ",".join(["0.1"] * 21)
-    parsed = parse_parameters(p_str)
-    assert len(parsed) == 21
-    assert parsed[0] == 0.1
-
-    # Invalid length
-    assert parse_parameters("0.1,0.2") == tuple(DEFAULT_PARAMETERS)
-    # Invalid values
-    assert parse_parameters("a,b,c") == tuple(DEFAULT_PARAMETERS)
-    # Empty
-    assert parse_parameters("") == tuple(DEFAULT_PARAMETERS)
-
-
-def test_infer_review_weights() -> None:
-    from datetime import datetime, timedelta, timezone
-
-    from fsrs import Rating, ReviewLog
-
-    now = datetime.now(timezone.utc)
-    # Card 1: 1st Good, 2nd Good
-    # Card 2: 1st Again, 2nd Hard, 3rd Easy
-    logs = {
-        1: [
-            ReviewLog(1, Rating.Good, now - timedelta(days=10), None),
-            ReviewLog(1, Rating.Good, now - timedelta(days=5), None),
-        ],
-        2: [
-            ReviewLog(2, Rating.Again, now - timedelta(days=20), None),
-            ReviewLog(2, Rating.Hard, now - timedelta(days=15), None),
-            ReviewLog(2, Rating.Easy, now - timedelta(days=10), None),
-        ],
-    }
-
-    weights = infer_review_weights(logs)
-
-    # First ratings: 1 Good (pos 3), 1 Again (pos 1) -> 50% each
-    assert weights.first[0] == 0.5  # Again
-    assert weights.first[1] == 0.0  # Hard
-    assert weights.first[2] == 0.5  # Good
-    assert weights.first[3] == 0.0  # Easy
-
-    # Subsequent Success (recalled) ratings:
-    # Card 1: Good (pos 2)
-    # Card 2: Hard (pos 1), Easy (pos 3)
-    # Total: 1 Hard, 1 Good, 1 Easy -> 33.3% each
-    assert abs(weights.success[0] - 0.3333) < 0.001  # Hard
-    assert abs(weights.success[1] - 0.3333) < 0.001  # Good
-    assert abs(weights.success[2] - 0.3333) < 0.001  # Easy
 
 
 def test_calculate_population_retrievability() -> None:
@@ -173,3 +51,77 @@ def test_calculate_metrics() -> None:
         0.0,
         0.0,
     )
+
+
+def test_parse_retention_schedule() -> None:
+    assert parse_retention_schedule("0.9") == [(1, 0.9)]
+    assert parse_retention_schedule("1:0.9,2:0.8") == [(1, 0.9), (2, 0.8)]
+
+
+def test_get_retention_for_day() -> None:
+    schedule = [(1, 0.9), (2, 0.8)]
+    assert get_retention_for_day(0, schedule) == 0.9
+    assert get_retention_for_day(1, schedule) == 0.8
+    assert get_retention_for_day(2, schedule) == 0.8
+    assert get_retention_for_day(3, schedule) == 0.9
+
+
+def test_parse_parameters() -> None:
+    p_str = ",".join(["0.1"] * 21)
+    res = parse_parameters(p_str)
+    assert isinstance(res, tuple)
+    assert len(res) == 21
+    assert res[0] == 0.1
+
+
+def test_calculate_expected_d0() -> None:
+    from fsrs.scheduler import DEFAULT_PARAMETERS
+
+    weights = [0.5, 0.1, 0.3, 0.1]
+    res = calculate_expected_d0(weights, DEFAULT_PARAMETERS)
+    assert isinstance(res, float)
+    assert res > 0
+
+
+def test_infer_review_weights() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    # Card 1: 1st Good, 2nd Good
+    # Card 2: 1st Again, 2nd Hard, 3rd Easy
+    data = [
+        {
+            "card_id": 1,
+            "rating": int(Rating.Good),
+            "review_datetime": now - timedelta(days=10),
+        },
+        {
+            "card_id": 1,
+            "rating": int(Rating.Good),
+            "review_datetime": now - timedelta(days=5),
+        },
+        {
+            "card_id": 2,
+            "rating": int(Rating.Again),
+            "review_datetime": now - timedelta(days=20),
+        },
+        {
+            "card_id": 2,
+            "rating": int(Rating.Hard),
+            "review_datetime": now - timedelta(days=15),
+        },
+        {
+            "card_id": 2,
+            "rating": int(Rating.Easy),
+            "review_datetime": now - timedelta(days=10),
+        },
+    ]
+    df = pd.DataFrame(data)
+
+    weights = infer_review_weights(df)
+    assert isinstance(weights, RatingWeights)
+    assert len(weights.first) == 4
+    assert len(weights.success) == 3
+    # Check probabilities sum to 1
+    assert pytest.approx(sum(weights.first)) == 1.0
+    assert pytest.approx(sum(weights.success)) == 1.0

@@ -4,7 +4,8 @@ from datetime import datetime
 from typing import Any, TypeAlias
 
 import numpy as np
-from fsrs import Card, ReviewLog
+import pandas as pd
+from fsrs import Card
 
 # Vectorized Estimator types (NumPy based)
 RatingEstimator: TypeAlias = Callable[
@@ -32,7 +33,7 @@ TimeEstimator: TypeAlias = Callable[
 
 @dataclass
 class SeededData:
-    logs: dict[int, list[ReviewLog]]
+    logs: pd.DataFrame
     last_rev: datetime
     true_cards: dict[int, Card]
     sys_cards: dict[int, Card]

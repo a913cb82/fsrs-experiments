@@ -1,5 +1,4 @@
 import random
-from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 from typing import Any, cast
@@ -27,7 +26,7 @@ from utils import (
 
 # Ensure we can import fsrs if it's not in path for some reason
 try:
-    from fsrs import Card, ReviewLog, Scheduler
+    from fsrs import Card, Rating, ReviewLog, Scheduler
     from fsrs.scheduler import DEFAULT_PARAMETERS
 except ImportError:
     import sys
@@ -322,19 +321,15 @@ def simulate_day_numpy(
 
 def _get_estimators_numpy(
     config: SimulationConfig,
-    card_logs: dict[int, list[ReviewLog]],
+    card_logs: pd.DataFrame,
     nature_params: tuple[float, ...],
 ) -> tuple[Any, Any]:
     weights = infer_review_weights(card_logs)
-    flat_logs = [log for logs_list in card_logs.values() for log in logs_list]
-    duration_data = defaultdict(list)
-    for log in flat_logs:
-        if log.review_duration is not None:
-            duration_data[int(log.rating)].append(log.review_duration)
     avg_durations = np.zeros(5)
-    for r in [1, 2, 3, 4]:
-        durs = duration_data[r]
-        avg_durations[r] = float(np.mean(durs)) if durs else 0.0
+    if not card_logs.empty and "review_duration" in card_logs.columns:
+        for r in [1, 2, 3, 4]:
+            durs = card_logs[card_logs["rating"] == r]["review_duration"].dropna()
+            avg_durations[r] = float(durs.mean()) if not durs.empty else 0.0
 
     # Handle Custom Rating Estimator
     if config.rating_estimator:
@@ -390,8 +385,6 @@ def _get_estimators_numpy(
 
     return rating_est, time_est
 
-    return rating_est, time_est
-
 
 def run_simulation(
     config: SimulationConfig,
@@ -423,7 +416,7 @@ def run_simulation(
     fsrs.optimizer.tqdm = patched_tqdm
 
     try:
-        init_true, init_sys, initial_card_logs, _ = _load_initial_state(
+        init_true, init_sys, initial_logs, _ = _load_initial_state(
             Scheduler(parameters=gt_params),
             Scheduler(parameters=algo_params),
             seeded_data,
@@ -434,9 +427,7 @@ def run_simulation(
         deck_true = Deck.from_cards(init_true)
         deck_sys = Deck.from_cards(init_sys)
 
-        rating_est, time_est = _get_estimators_numpy(
-            config, initial_card_logs, gt_params
-        )
+        rating_est, time_est = _get_estimators_numpy(config, initial_logs, gt_params)
         card_logs_acc: dict[str, list[np.ndarray[Any, Any]]] = {
             "card_id": [],
             "rating": [],
@@ -450,9 +441,18 @@ def run_simulation(
         )
 
         # Pre-construct items for initial logs
-        initial_logs_flat = [log for logs in initial_card_logs.values() for log in logs]
-        opt_init = RustOptimizer(review_logs=initial_logs_flat)
-        seeded_items = opt_init.get_items()
+        if not initial_logs.empty:
+            opt_init = RustOptimizer()
+            seeded_items = opt_init.get_items_from_arrays(
+                initial_logs["card_id"].values,
+                initial_logs["rating"].values,
+                (
+                    (initial_logs["review_datetime"] - START_DATE).dt.total_seconds()
+                    / 86400
+                ).values,
+            )
+        else:
+            seeded_items = []
 
         phases = [
             (
@@ -530,21 +530,8 @@ def run_simulation(
 
         # Final metrics
         if config.return_logs:
-            # 1. Process initial logs
-            initial_logs_flat = [
-                log for logs in initial_card_logs.values() for log in logs
-            ]
-            df_initial = pd.DataFrame.from_records(
-                [
-                    {
-                        "card_id": log.card_id,
-                        "rating": int(log.rating),
-                        "review_datetime": log.review_datetime,
-                        "review_duration": log.review_duration,
-                    }
-                    for log in initial_logs_flat
-                ]
-            )
+            # initial_logs is already a DataFrame
+            df_initial = initial_logs
 
             # 2. Process simulated logs
             if all_card_ids is not None:
@@ -571,8 +558,7 @@ def run_simulation(
         metrics = {
             "review_count": len(total_logs)
             if config.return_logs
-            else total_simulated_reviews
-            + sum(len(ls) for ls in initial_card_logs.values()),
+            else total_simulated_reviews + len(initial_logs),
             "card_count": len(deck_true),
             "stabilities": (
                 deck_true.current_stabilities,
@@ -599,23 +585,40 @@ def _load_initial_state(
     seed_history: str | None,
     deck_config: str | None,
     deck_name: str | None,
-) -> tuple[list[Card], list[Card], dict[int, list[ReviewLog]], datetime]:
-    true_cards, sys_cards, card_logs = [], [], defaultdict(list)
+) -> tuple[list[Card], list[Card], pd.DataFrame, datetime]:
+    true_cards, sys_cards, card_logs = [], [], pd.DataFrame()
+    current_date = START_DATE
     if seeded_data:
         current_date = seeded_data.last_rev + timedelta(days=1)
         true_cards, sys_cards, card_logs = (
             list(deepcopy(seeded_data.true_cards).values()),
             list(deepcopy(seeded_data.sys_cards).values()),
-            deepcopy(seeded_data.logs),
+            seeded_data.logs,
         )
     elif seed_history:
-        logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
+        logs_df, last_rev = load_anki_history(seed_history, deck_config, deck_name)
         current_date = last_rev + timedelta(days=1)
-        for cid, logs_list in logs.items():
+        card_logs = logs_df
+        # We need to reschedule cards to get their current state
+        # load_anki_history now returns a DataFrame, so we need to process it
+        # This is a bit slow but only happens once.
+        # However, for simulation we need Card objects for the initial state.
+
+        # Log rows to ReviewLog conversion for reschedule_card
+        # Actually, let's just group the logs_df
+        for cid, group in logs_df.groupby("card_id"):
+            sorted_group = group.sort_values("review_datetime")
+            logs_list = [
+                ReviewLog(
+                    card_id=int(row.card_id),
+                    rating=Rating(int(row.rating)),
+                    review_datetime=row.review_datetime,
+                    review_duration=row.review_duration,
+                )
+                for row in sorted_group.itertuples()
+            ]
             card = Card(card_id=cid)
             true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
             sys_cards.append(algo_scheduler.reschedule_card(card, logs_list))
-            card_logs[cid].extend(logs_list)
-    else:
-        current_date = START_DATE
+
     return true_cards, sys_cards, card_logs, current_date
