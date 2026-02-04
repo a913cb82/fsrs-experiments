@@ -1,24 +1,23 @@
 import random
 from collections import defaultdict
-from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from tqdm import tqdm
 
+import fsrs_engine
 from anki_utils import (
     START_DATE,
     infer_review_weights,
     load_anki_history,
 )
+from deck import Deck
 from optimizer import RustOptimizer
 from simulation_config import (
-    RatingEstimator,
     SeededData,
     SimulationConfig,
-    TimeEstimator,
 )
 from utils import (
     get_retention_for_day,
@@ -35,330 +34,413 @@ except ImportError:
     sys.exit("Error: fsrs package not found. Please install it.")
 
 
-def _batch_process_reviews(
-    sys_cards_batch: Sequence[Card],
-    true_cards_batch: Sequence[Card],
-    nature_scheduler: Scheduler,
-    algo_scheduler: Scheduler,
-    current_date: datetime,
-    rating_estimator: RatingEstimator,
-    time_estimator: TimeEstimator,
-    card_logs: dict[int, list[ReviewLog]],
+def _batch_process_reviews_numpy(
+    deck_sys: Deck,
+    deck_true: Deck,
+    indices: np.ndarray[Any, Any],
+    nature_params: tuple[float, ...],
+    algo_params: tuple[float, ...],
+    current_day_idx: int,
+    desired_retention: float,
+    rating_estimator: Any,
+    time_estimator: Any,
+    card_logs_acc: dict[str, list[np.ndarray[Any, Any]]],
     start_time_accumulated: float,
     time_limit: float | None,
-) -> tuple[int, float, list[Card], list[Card]]:
-    """
-    Process a batch of reviews.
-    Returns:
-        reviews_done: Number of reviews actually completed (due to time limit)
-        new_time_accumulated: Updated time
-        updated_sys_cards: List of updated system cards (length = reviews_done)
-        updated_true_cards: List of updated true cards (length = reviews_done)
-    """
-    if not sys_cards_batch:
-        return 0, start_time_accumulated, [], []
+) -> tuple[int, float]:
+    if len(indices) == 0:
+        return 0, start_time_accumulated
 
-    # 1. Predict Ratings (Batch)
-    ratings_vals = rating_estimator(true_cards_batch, current_date, nature_scheduler)
-
-    # 2. Predict Times (Batch)
-    times_vals = time_estimator(
-        true_cards_batch, current_date, ratings_vals, nature_scheduler
+    ratings_vals = rating_estimator(
+        deck_true.stabilities[indices],
+        deck_true.difficulties[indices],
+        current_day_idx,
+        deck_true.last_reviews[indices],
+        nature_params,
     )
 
-    current_accumulated = start_time_accumulated
-    reviews_done = 0
-    updated_sys_cards = []
-    updated_true_cards = []
+    times_vals = time_estimator(
+        deck_true.stabilities[indices],
+        deck_true.difficulties[indices],
+        current_day_idx,
+        deck_true.last_reviews[indices],
+        nature_params,
+        ratings_vals,
+    )
 
-    for i in range(len(sys_cards_batch)):
-        sys_card = sys_cards_batch[i]
-        true_card = true_cards_batch[i]
-        r_val = ratings_vals[i]
-        t_val = times_vals[i]
-
-        # Check time limit
-        if time_limit is not None and current_accumulated + t_val > time_limit:
-            break
-
-        current_accumulated += t_val
-        reviews_done += 1
-
-        rating = Rating(r_val)
-        updated_true_card, _ = nature_scheduler.review_card(
-            true_card, rating, current_date
-        )
-        updated_sys_card, log = algo_scheduler.review_card(
-            sys_card, rating, current_date
-        )
-
-        card_logs[updated_sys_card.card_id].append(log)
-        updated_sys_cards.append(updated_sys_card)
-        updated_true_cards.append(updated_true_card)
-
-    return reviews_done, current_accumulated, updated_sys_cards, updated_true_cards
-
-
-def simulate_day(
-    nature_scheduler: Scheduler,
-    algo_scheduler: Scheduler,
-    true_cards: list[Card],
-    sys_cards: list[Card],
-    card_logs: dict[int, list[ReviewLog]],
-    current_date: datetime,
-    config: SimulationConfig,
-    rating_estimator: RatingEstimator,
-    time_estimator: TimeEstimator,
-    next_card_id: int,
-) -> int:
-    # Use NumPy for fast due-check across the deck
-    dues = np.array([c.due for c in sys_cards])
-    due_mask = dues <= current_date
-    due_indices = np.where(due_mask)[0].tolist()
-
-    # Sort indices to keep deterministic if needed
-    due_indices = sorted(due_indices)
-    random.shuffle(due_indices)
-
-    # 1. Due Cards Processing
-
-    # Select candidates based on review limit
-    candidate_indices = due_indices
-    if config.review_limit is not None:
-        candidate_indices = due_indices[: config.review_limit]
-
-    if candidate_indices:
-        batch_sys = [sys_cards[i] for i in candidate_indices]
-        batch_true = [true_cards[i] for i in candidate_indices]
-
-        reviews_done, time_accumulated, updated_sys, updated_true = (
-            _batch_process_reviews(
-                batch_sys,
-                batch_true,
-                nature_scheduler,
-                algo_scheduler,
-                current_date,
-                rating_estimator,
-                time_estimator,
-                card_logs,
-                start_time_accumulated=0.0,
-                time_limit=config.time_limit,
+    cumulative_times = np.cumsum(times_vals)
+    if time_limit is not None:
+        reviews_done = int(
+            np.searchsorted(
+                cumulative_times + start_time_accumulated, time_limit, side="right"
             )
         )
+    else:
+        reviews_done = len(indices)
 
-        # Update the cards in the main lists
-        for k, idx in enumerate(candidate_indices[:reviews_done]):
-            sys_cards[idx] = updated_sys[k]
-            true_cards[idx] = updated_true[k]
+    if reviews_done == 0:
+        return 0, start_time_accumulated
+
+    actual_indices = indices[:reviews_done]
+    actual_ratings = ratings_vals[:reviews_done]
+    actual_times = times_vals[:reviews_done]
+    new_accumulated = float(start_time_accumulated + cumulative_times[reviews_done - 1])
+
+    forget_mask = actual_ratings == 1
+    recall_mask = ~forget_mask
+
+    if np.any(recall_mask):
+        idx_recall = actual_indices[recall_mask]
+        rat_recall = actual_ratings[recall_mask]
+
+        # Ground Truth
+        ret_true = fsrs_engine.predict_retrievability(
+            deck_true.stabilities[idx_recall],
+            current_day_idx - deck_true.last_reviews[idx_recall],
+            nature_params,
+        )
+        new_s_true, new_d_true = fsrs_engine.update_state_recall(
+            deck_true.stabilities[idx_recall],
+            deck_true.difficulties[idx_recall],
+            rat_recall,
+            ret_true,
+            nature_params,
+        )
+        deck_true.stabilities[idx_recall] = new_s_true
+        deck_true.difficulties[idx_recall] = new_d_true
+
+        # Algo
+        ret_sys = fsrs_engine.predict_retrievability(
+            deck_sys.stabilities[idx_recall],
+            current_day_idx - deck_sys.last_reviews[idx_recall],
+            algo_params,
+        )
+        new_s_sys, new_d_sys = fsrs_engine.update_state_recall(
+            deck_sys.stabilities[idx_recall],
+            deck_sys.difficulties[idx_recall],
+            rat_recall,
+            ret_sys,
+            algo_params,
+        )
+        deck_sys.stabilities[idx_recall] = new_s_sys
+        deck_sys.difficulties[idx_recall] = new_d_sys
+
+        intervals = fsrs_engine.next_interval(new_s_sys, desired_retention, algo_params)
+        deck_sys.dues[idx_recall] = current_day_idx + intervals
+        deck_sys.last_reviews[idx_recall] = current_day_idx
+        deck_true.last_reviews[idx_recall] = current_day_idx
+
+    if np.any(forget_mask):
+        idx_forget = actual_indices[forget_mask]
+
+        # Ground Truth
+        ret_true = fsrs_engine.predict_retrievability(
+            deck_true.stabilities[idx_forget],
+            current_day_idx - deck_true.last_reviews[idx_forget],
+            nature_params,
+        )
+        new_s_true, new_d_true = fsrs_engine.update_state_forget(
+            deck_true.stabilities[idx_forget],
+            deck_true.difficulties[idx_forget],
+            ret_true,
+            nature_params,
+        )
+        deck_true.stabilities[idx_forget] = new_s_true
+        deck_true.difficulties[idx_forget] = new_d_true
+
+        # Algo
+        ret_sys = fsrs_engine.predict_retrievability(
+            deck_sys.stabilities[idx_forget],
+            current_day_idx - deck_sys.last_reviews[idx_forget],
+            algo_params,
+        )
+        new_s_sys, new_d_sys = fsrs_engine.update_state_forget(
+            deck_sys.stabilities[idx_forget],
+            deck_sys.difficulties[idx_forget],
+            ret_sys,
+            algo_params,
+        )
+        deck_sys.stabilities[idx_forget] = new_s_sys
+        deck_sys.difficulties[idx_forget] = new_d_sys
+
+        deck_sys.dues[idx_forget] = current_day_idx + 1
+        deck_sys.last_reviews[idx_forget] = current_day_idx
+        deck_true.last_reviews[idx_forget] = current_day_idx
+
+    # Logging - Append NumPy arrays to avoid Python scalar overhead
+    card_logs_acc["card_id"].append(deck_sys.card_ids[actual_indices])
+    card_logs_acc["rating"].append(actual_ratings)
+    card_logs_acc["day"].append(np.full(reviews_done, current_day_idx, dtype=np.int32))
+    card_logs_acc["duration"].append(actual_times)
+
+    return reviews_done, new_accumulated
+
+
+def simulate_day_numpy(
+    nature_params: tuple[float, ...],
+    algo_params: tuple[float, ...],
+    deck_true: Deck,
+    deck_sys: Deck,
+    card_logs_acc: dict[str, list[np.ndarray[Any, Any]]],
+    current_day_idx: int,
+    config: SimulationConfig,
+    desired_retention: float,
+    rating_estimator: Any,
+    time_estimator: Any,
+    next_card_id: int,
+) -> int:
+    due_mask = deck_sys.current_dues <= current_day_idx
+    due_indices = np.where(due_mask)[0]
+
+    if len(due_indices) > 0:
+        np.random.shuffle(due_indices)
+        if config.review_limit is not None:
+            due_indices = due_indices[: config.review_limit]
+
+        reviews_done, time_accumulated = _batch_process_reviews_numpy(
+            deck_sys,
+            deck_true,
+            due_indices,
+            nature_params,
+            algo_params,
+            current_day_idx,
+            desired_retention,
+            rating_estimator,
+            time_estimator,
+            card_logs_acc,
+            0.0,
+            config.time_limit,
+        )
     else:
         reviews_done = 0
         time_accumulated = 0.0
 
-    # 2. New Cards Processing
-    # Process new cards in chunks to respect time limits and avoid over-allocation
     new_done = 0
     new_batch_size = 50
-
     while True:
-        # Check global stopping conditions
         if config.time_limit is not None and time_accumulated >= config.time_limit:
             break
 
-        remaining_total_reviews = (
+        remaining_total = (
             (config.review_limit - reviews_done)
             if config.review_limit is not None
             else 999999
         )
-        remaining_new_cards = (
+        remaining_new = (
             (config.new_limit - new_done) if config.new_limit is not None else 999999
         )
 
-        # We stop if we hit review limit or new card limit
-        if remaining_total_reviews <= 0 or remaining_new_cards <= 0:
+        if remaining_total <= 0 or remaining_new <= 0:
             break
 
-        # Determine batch size for this iteration
-        batch_size = min(new_batch_size, remaining_total_reviews, remaining_new_cards)
+        batch_size = min(new_batch_size, remaining_total, remaining_new)
+        new_ids = np.arange(next_card_id, next_card_id + batch_size, dtype=np.int64)
+        next_card_id += int(batch_size)
 
-        # Generate IDs and Cards
-        new_ids = list(range(next_card_id, next_card_id + batch_size))
-        next_card_id += batch_size
-
-        new_batch_sys = [Card(card_id=uid) for uid in new_ids]
-        new_batch_true = [Card(card_id=uid) for uid in new_ids]
-
-        # Process this batch
-        batch_completed, time_accumulated, updated_sys, updated_true = (
-            _batch_process_reviews(
-                new_batch_sys,
-                new_batch_true,
-                nature_scheduler,
-                algo_scheduler,
-                current_date,
-                rating_estimator,
-                time_estimator,
-                card_logs,
-                start_time_accumulated=time_accumulated,
-                time_limit=config.time_limit,
-            )
+        init_ratings = rating_estimator(
+            np.zeros(batch_size),
+            np.zeros(batch_size),
+            current_day_idx,
+            np.full(batch_size, -1),
+            nature_params,
         )
 
-        # Update counters
+        s_true = fsrs_engine.init_stability(init_ratings, nature_params)
+        d_true = fsrs_engine.init_difficulty(init_ratings, nature_params)
+        s_sys = fsrs_engine.init_stability(init_ratings, algo_params)
+        d_sys = fsrs_engine.init_difficulty(init_ratings, algo_params)
+
+        intervals = fsrs_engine.next_interval(s_sys, desired_retention, algo_params)
+        dues = current_day_idx + intervals
+        dues[init_ratings == 1] = current_day_idx + 1
+
+        times = time_estimator(
+            np.zeros(batch_size),  # stability 0
+            np.zeros(batch_size),  # difficulty 0
+            current_day_idx,
+            np.full(batch_size, -1),  # last review -1
+            nature_params,
+            init_ratings,
+        )
+
+        # Check time limit within the new cards batch
+        cumulative_times = np.cumsum(times)
+        if config.time_limit is not None:
+            batch_completed = int(
+                np.searchsorted(
+                    cumulative_times + time_accumulated,
+                    config.time_limit,
+                    side="right",
+                )
+            )
+        else:
+            batch_completed = int(batch_size)
+
+        if batch_completed == 0:
+            break
+
+        # Slice to actual completed
+        init_ratings = init_ratings[:batch_completed]
+        new_ids = cast(np.ndarray[Any, Any], new_ids[:batch_completed])
+        times = times[:batch_completed]
+
+        s_true = s_true[:batch_completed]
+        d_true = d_true[:batch_completed]
+        s_sys = s_sys[:batch_completed]
+        d_sys = d_sys[:batch_completed]
+        dues = dues[:batch_completed]
+
+        deck_true.add_cards(
+            new_ids,
+            s_true,
+            d_true,
+            np.full(batch_completed, current_day_idx),
+            np.full(batch_completed, current_day_idx),
+        )
+        deck_sys.add_cards(
+            new_ids, s_sys, d_sys, dues, np.full(batch_completed, current_day_idx)
+        )
+
+        # Log these new cards
+        card_logs_acc["card_id"].append(new_ids)
+        card_logs_acc["rating"].append(init_ratings)
+        card_logs_acc["day"].append(
+            np.full(batch_completed, current_day_idx, dtype=np.int32)
+        )
+        card_logs_acc["duration"].append(times)
+
+        time_accumulated += float(np.sum(times))
         reviews_done += batch_completed
         new_done += batch_completed
 
-        # Add processed cards to deck
-        true_cards.extend(updated_true)
-        sys_cards.extend(updated_sys)
-
-        # If batch is incomplete, we hit the time limit
         if batch_completed < batch_size:
             break
 
     return next_card_id
 
 
-def _load_initial_state(
-    nature_scheduler: Scheduler,
-    algo_scheduler: Scheduler,
-    seeded_data: SeededData | None,
-    seed_history: str | None,
-    deck_config: str | None,
-    deck_name: str | None,
-) -> tuple[list[Card], list[Card], dict[int, list[ReviewLog]], datetime]:
-    true_cards: list[Card] = []
-    sys_cards: list[Card] = []
-    card_logs: dict[int, list[ReviewLog]] = defaultdict(list)
-
-    if seeded_data:
-        current_date = seeded_data.last_rev + timedelta(days=1)
-        true_cards = list(deepcopy(seeded_data.true_cards).values())
-        sys_cards = list(deepcopy(seeded_data.sys_cards).values())
-        card_logs = deepcopy(seeded_data.logs)
-    elif seed_history:
-        logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
-        current_date = last_rev + timedelta(days=1)
-        for cid, logs_list in logs.items():
-            card = Card(card_id=cid)
-            true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
-            sys_cards.append(algo_scheduler.reschedule_card(card, logs_list))
-            card_logs[cid].extend(logs_list)
-    else:
-        current_date = START_DATE
-
-    return true_cards, sys_cards, card_logs, current_date
-
-
-def _initialize_estimators(
+def _get_estimators_numpy(
     config: SimulationConfig,
     card_logs: dict[int, list[ReviewLog]],
-) -> tuple[RatingEstimator, TimeEstimator]:
-    # Rating Estimator
-    rating_estimator = config.rating_estimator
-    if rating_estimator is None:
-        weights = infer_review_weights(card_logs)
+    nature_params: tuple[float, ...],
+) -> tuple[Any, Any]:
+    weights = infer_review_weights(card_logs)
+    flat_logs = [log for logs_list in card_logs.values() for log in logs_list]
+    duration_data = defaultdict(list)
+    for log in flat_logs:
+        if log.review_duration is not None:
+            duration_data[int(log.rating)].append(log.review_duration)
+    avg_durations = np.zeros(5)
+    for r in [1, 2, 3, 4]:
+        durs = duration_data[r]
+        avg_durations[r] = float(np.mean(durs)) if durs else 0.0
 
-        def default_rating_est(
-            true_cards: Sequence[Card], date: datetime, nature_scheduler: Scheduler
-        ) -> Sequence[int]:
-            results = []
-            for true_card in true_cards:
-                if true_card.stability is not None and true_card.stability > 0:
-                    retrievability = nature_scheduler.get_card_retrievability(
-                        true_card, date
+    # Handle Custom Rating Estimator
+    if config.rating_estimator:
+        if getattr(config.rating_estimator, "_vectorized", False):
+            rating_est = config.rating_estimator
+        else:
+
+            def rating_est(
+                stabilities: np.ndarray[Any, Any],
+                difficulties: np.ndarray[Any, Any],
+                date_days: int | np.ndarray[Any, Any],
+                last_reviews: np.ndarray[Any, Any],
+                params: tuple[float, ...],
+            ) -> np.ndarray[Any, Any]:
+                cards = []
+                for s, d, lr in zip(
+                    stabilities, difficulties, last_reviews, strict=False
+                ):
+                    card = Card(stability=s, difficulty=d)
+                    if lr != -1:
+                        card.last_review = START_DATE + timedelta(days=int(lr))
+                    cards.append(card)
+                current_date = START_DATE + timedelta(days=int(date_days))
+                nature_scheduler = Scheduler(parameters=nature_params)
+                return np.array(
+                    config.rating_estimator(cards, current_date, nature_scheduler)
+                )
+    else:
+
+        def rating_est(
+            stabilities: np.ndarray[Any, Any],
+            difficulties: np.ndarray[Any, Any],
+            date_days: int | np.ndarray[Any, Any],
+            last_reviews: np.ndarray[Any, Any],
+            params: tuple[float, ...],
+        ) -> np.ndarray[Any, Any]:
+            count = len(stabilities)
+            results = np.zeros(count, dtype=np.int8)
+            new_mask = last_reviews == -1
+            review_mask = ~new_mask
+            if np.any(new_mask):
+                results[new_mask] = np.random.choice(
+                    [1, 2, 3, 4], size=np.sum(new_mask), p=weights.first
+                )
+            if np.any(review_mask):
+                n_rev = np.sum(review_mask)
+                rets = fsrs_engine.predict_retrievability(
+                    stabilities[review_mask],
+                    date_days - last_reviews[review_mask],
+                    params,
+                )
+                success = np.random.random(n_rev) < rets
+                results_rev = np.ones(n_rev, dtype=np.int8)
+                n_success = np.sum(success)
+                if n_success > 0:
+                    results_rev[success] = np.random.choice(
+                        [2, 3, 4], size=n_success, p=weights.success
                     )
-                    if random.random() < retrievability:
-                        results.append(
-                            int(
-                                random.choices(
-                                    [Rating.Hard, Rating.Good, Rating.Easy],
-                                    weights=weights.success,
-                                )[0]
-                            )
-                        )
-                    else:
-                        results.append(int(Rating.Again))
-                else:
-                    results.append(
-                        int(
-                            random.choices(
-                                [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy],
-                                weights=weights.first,
-                            )[0]
-                        )
-                    )
+                results[review_mask] = results_rev
             return results
 
-        rating_estimator = default_rating_est
+        rating_est._vectorized = True
 
-    # Time Estimator
-    time_estimator = config.time_estimator
-    if time_estimator is None:
-        flat_logs = [log for logs_list in card_logs.values() for log in logs_list]
-        duration_data = defaultdict(list)
-        for log in flat_logs:
-            if log.review_duration is not None:
-                duration_data[int(log.rating)].append(log.review_duration)
+    # Handle Custom Time Estimator
+    if config.time_estimator:
+        if getattr(config.time_estimator, "_vectorized", False):
+            time_est = config.time_estimator
+        else:
 
-        avg_durations = {}
-        for r in [Rating.Again, Rating.Hard, Rating.Good, Rating.Easy]:
-            durs = duration_data[int(r)]
-            avg_durations[int(r)] = float(np.mean(durs)) if durs else 0.0
+            def time_est(
+                stabilities: np.ndarray[Any, Any],
+                difficulties: np.ndarray[Any, Any],
+                day_idx: int | np.ndarray[Any, Any],
+                last_reviews: np.ndarray[Any, Any],
+                params: tuple[float, ...],
+                ratings: np.ndarray[Any, Any],
+            ) -> np.ndarray[Any, Any]:
+                cards = []
+                for s, d, lr in zip(
+                    stabilities, difficulties, last_reviews, strict=False
+                ):
+                    card = Card(stability=s, difficulty=d)
+                    if lr != -1:
+                        card.last_review = START_DATE + timedelta(days=int(lr))
+                    cards.append(card)
+                current_date = START_DATE + timedelta(days=int(day_idx))
+                nature_scheduler = Scheduler(parameters=nature_params)
+                return np.array(
+                    config.time_estimator(
+                        cards, current_date, ratings.tolist(), nature_scheduler
+                    )
+                )
+    else:
 
-        def default_time_est(
-            true_cards: Sequence[Card],
-            date: datetime,
-            ratings: Sequence[int],
-            nature_scheduler: Scheduler,
-        ) -> Sequence[float]:
-            return [avg_durations.get(r, 0.0) for r in ratings]
+        def time_est(
+            stabilities: np.ndarray[Any, Any],
+            difficulties: np.ndarray[Any, Any],
+            day_idx: int | np.ndarray[Any, Any],
+            last_reviews: np.ndarray[Any, Any],
+            params: tuple[float, ...],
+            ratings: np.ndarray[Any, Any],
+        ) -> np.ndarray[Any, Any]:
+            return cast(np.ndarray[Any, Any], avg_durations[ratings])
 
-        time_estimator = default_time_est
+        time_est._vectorized = True
 
-    return rating_estimator, time_estimator
-
-
-def _calculate_final_metrics(
-    true_cards: list[Card],
-    sys_cards: list[Card],
-    card_logs: dict[int, list[ReviewLog]],
-    nature_scheduler: Scheduler,
-    current_date: datetime,
-    verbose: bool,
-) -> tuple[list[float] | None, dict[str, Any]]:
-    all_logs_final = [log for logs in card_logs.values() for log in logs]
-    fitted_params = None
-    try:
-        optimizer = RustOptimizer(all_logs_final)
-        fitted_params = optimizer.compute_optimal_parameters(verbose=verbose)
-    except Exception:
-        pass
-
-    stabilities = []
-    total_retention = 0.0
-    if fitted_params:
-        final_algo_scheduler = Scheduler(parameters=tuple(fitted_params))
-        for i in range(len(true_cards)):
-            card_id = true_cards[i].card_id
-            s_nat = true_cards[i].stability or 0.0
-            r_nat = nature_scheduler.get_card_retrievability(
-                true_cards[i], current_date
-            )
-            total_retention += r_nat
-            rescheduled = final_algo_scheduler.reschedule_card(
-                Card(card_id=card_id), card_logs[card_id]
-            )
-            s_alg = rescheduled.stability or 0.0
-            stabilities.append((s_nat, s_alg))
-
-    metrics = {
-        "review_count": len(all_logs_final),
-        "card_count": len(true_cards),
-        "stabilities": stabilities,
-        "total_retention": total_retention,
-        "logs": all_logs_final,
-    }
-    return fitted_params, metrics
+    return rating_est, time_est
 
 
 def run_simulation(
@@ -372,61 +454,67 @@ def run_simulation(
     tqdm_pos: int = 0,
 ) -> tuple[list[float] | None, tuple[float, ...], dict[str, Any]]:
     parsed_schedule = parse_retention_schedule(config.retention)
-    initial_retention = get_retention_for_day(0, parsed_schedule)
-
+    np.random.seed(config.seed)
     random.seed(config.seed)
-    ground_truth_params = (
-        ground_truth if ground_truth is not None else DEFAULT_PARAMETERS
-    )
+
+    gt_params = ground_truth if ground_truth is not None else DEFAULT_PARAMETERS
+    algo_params = initial_params or DEFAULT_PARAMETERS
 
     import fsrs.optimizer
 
-    original_optimizer_tqdm = fsrs.optimizer.tqdm
+    original_tqdm = fsrs.optimizer.tqdm
 
     def patched_tqdm(*args: Any, **kwargs: Any) -> Any:
         if "position" not in kwargs:
             kwargs["position"] = tqdm_pos + 1
-        if "leave" not in kwargs:
-            kwargs["leave"] = False
-        return original_optimizer_tqdm(*args, **kwargs)
+        kwargs["leave"] = False
+        return original_tqdm(*args, **kwargs)
 
     fsrs.optimizer.tqdm = patched_tqdm
 
     try:
-        nature_scheduler = Scheduler(
-            parameters=ground_truth_params, desired_retention=initial_retention
-        )
-        algo_scheduler = Scheduler(
-            parameters=initial_params or DEFAULT_PARAMETERS,
-            desired_retention=initial_retention,
-        )
-
-        true_cards, sys_cards, card_logs, current_date = _load_initial_state(
-            nature_scheduler,
-            algo_scheduler,
+        init_true, init_sys, initial_card_logs, _ = _load_initial_state(
+            Scheduler(parameters=gt_params),
+            Scheduler(parameters=algo_params),
             seeded_data,
             seed_history,
             deck_config,
             deck_name,
         )
+        deck_true = Deck.from_cards(init_true)
+        deck_sys = Deck.from_cards(init_sys)
 
-        rating_estimator, time_estimator = _initialize_estimators(config, card_logs)
+        rating_est, time_est = _get_estimators_numpy(
+            config, initial_card_logs, gt_params
+        )
+        card_logs_acc: dict[str, list[np.ndarray[Any, Any]]] = {
+            "card_id": [],
+            "rating": [],
+            "day": [],
+            "duration": [],
+        }
+        next_card_id = (
+            int(np.max(deck_sys.current_card_ids)) + 1
+            if len(deck_sys) > 0
+            else int(datetime.now().timestamp() * 1000)
+        )
 
-        # Initialize next_card_id to avoid sleep in Card() constructor
-        if sys_cards:
-            max_id = max(c.card_id for c in sys_cards)
-            next_card_id = max_id + 1
-        else:
-            next_card_id = int(datetime.now().timestamp() * 1000)
+        # Pre-construct items for initial logs
+        initial_logs_flat = [log for logs in initial_card_logs.values() for log in logs]
+        opt_init = RustOptimizer(review_logs=initial_logs_flat)
+        seeded_items = opt_init.get_items()
 
-        # Simulation Phases
+        phases = [
+            (
+                "P1",
+                config.burn_in_days
+                if 0 < config.burn_in_days < config.n_days
+                else config.n_days,
+                0,
+            )
+        ]
         if 0 < config.burn_in_days < config.n_days:
-            phases = [
-                ("P1", config.burn_in_days, 0),
-                ("P2", config.n_days, config.burn_in_days),
-            ]
-        else:
-            phases = [("P1", config.n_days, 0)]
+            phases.append(("P2", config.n_days, config.burn_in_days))
 
         for phase_name, limit, start_day in phases:
             pbar = tqdm(
@@ -436,50 +524,126 @@ def run_simulation(
                 leave=False,
                 disable=not config.verbose,
             )
-
             for day in pbar:
-                daily_retention = get_retention_for_day(day, parsed_schedule)
-                algo_scheduler.desired_retention = daily_retention
-                next_card_id = simulate_day(
-                    nature_scheduler,
-                    algo_scheduler,
-                    true_cards,
-                    sys_cards,
-                    card_logs,
-                    current_date,
+                ret = get_retention_for_day(day, parsed_schedule)
+                next_card_id = simulate_day_numpy(
+                    gt_params,
+                    algo_params,
+                    deck_true,
+                    deck_sys,
+                    card_logs_acc,
+                    day,
                     config,
-                    rating_estimator,
-                    time_estimator,
+                    ret,
+                    rating_est,
+                    time_est,
                     next_card_id,
                 )
-                current_date += timedelta(days=1)
 
-            # Re-fit algo scheduler after burn-in
             if phase_name == "P1" and 0 < config.burn_in_days < config.n_days:
-                all_logs = [log for logs in card_logs.values() for log in logs]
-                if len(all_logs) >= 512:
-                    optimizer = RustOptimizer(all_logs)
-                    fitted_bi = optimizer.compute_optimal_parameters(
-                        verbose=config.verbose
+                # Re-fit algo scheduler
+                if card_logs_acc["card_id"]:
+                    all_card_ids = np.concatenate(card_logs_acc["card_id"])
+                    all_ratings = np.concatenate(card_logs_acc["rating"])
+                    all_days = np.concatenate(card_logs_acc["day"])
+
+                    optimizer = RustOptimizer(pre_constructed_items=seeded_items)
+                    new_params = optimizer.compute_optimal_parameters_from_arrays(
+                        all_card_ids, all_ratings, all_days, verbose=config.verbose
                     )
-                    algo_scheduler = Scheduler(
-                        parameters=tuple(fitted_bi),
-                        desired_retention=algo_scheduler.desired_retention,
-                    )
-                    for i, card in enumerate(sys_cards):
-                        sys_cards[i] = algo_scheduler.reschedule_card(
-                            Card(card_id=card.card_id), card_logs[card.card_id]
+                    if new_params:
+                        algo_params = tuple(new_params)
+
+        # Optimization: Use optimized optimizer call
+        total_simulated_reviews = 0
+        all_card_ids = None
+        if card_logs_acc["card_id"]:
+            all_card_ids = np.concatenate(card_logs_acc["card_id"])
+            total_simulated_reviews = len(all_card_ids)
+
+        if config.compute_final_params:
+            if all_card_ids is not None:
+                all_ratings = np.concatenate(card_logs_acc["rating"])
+                all_days = np.concatenate(card_logs_acc["day"])
+
+                optimizer = RustOptimizer(pre_constructed_items=seeded_items)
+                fitted_params = optimizer.compute_optimal_parameters_from_arrays(
+                    all_card_ids, all_ratings, all_days, verbose=config.verbose
+                )
+            else:
+                optimizer = RustOptimizer(pre_constructed_items=seeded_items)
+                fitted_params = optimizer.compute_optimal_parameters(
+                    verbose=config.verbose
+                )
+        else:
+            fitted_params = None
+
+        # Final metrics
+        all_logs_final = []
+        if config.return_logs:
+            if all_card_ids is not None:
+                all_ratings = np.concatenate(card_logs_acc["rating"])
+                all_days = np.concatenate(card_logs_acc["day"])
+                all_durations = np.concatenate(card_logs_acc["duration"])
+
+                # This loop is still slow, but we've already optimized the hot loop
+                for i in range(len(all_card_ids)):
+                    all_logs_final.append(
+                        ReviewLog(
+                            card_id=int(all_card_ids[i]),
+                            rating=Rating(int(all_ratings[i])),
+                            review_datetime=START_DATE
+                            + timedelta(days=int(all_days[i])),
+                            review_duration=int(all_durations[i]),
                         )
+                    )
 
-        fitted_params, metrics = _calculate_final_metrics(
-            true_cards,
-            sys_cards,
-            card_logs,
-            nature_scheduler,
-            current_date,
-            config.verbose,
-        )
-
-        return fitted_params, ground_truth_params, metrics
+        # total_logs is used by metrics["logs"] and weights calculation
+        # If we didn't return logs, total_logs will just be the initial logs
+        initial_logs_flat = [log for logs in initial_card_logs.values() for log in logs]
+        total_logs = initial_logs_flat + all_logs_final
+        metrics = {
+            "review_count": len(initial_logs_flat) + total_simulated_reviews,
+            "card_count": len(deck_true),
+            "stabilities": [],
+            "total_retention": np.sum(
+                fsrs_engine.predict_retrievability(
+                    deck_true.current_stabilities,
+                    config.n_days - deck_true.current_last_reviews,
+                    gt_params,
+                )
+            ),
+            "logs": total_logs,
+        }
+        return fitted_params, gt_params, metrics
     finally:
-        fsrs.optimizer.tqdm = original_optimizer_tqdm
+        fsrs.optimizer.tqdm = original_tqdm
+
+
+def _load_initial_state(
+    nature_scheduler: Scheduler,
+    algo_scheduler: Scheduler,
+    seeded_data: SeededData | None,
+    seed_history: str | None,
+    deck_config: str | None,
+    deck_name: str | None,
+) -> tuple[list[Card], list[Card], dict[int, list[ReviewLog]], datetime]:
+    true_cards, sys_cards, card_logs = [], [], defaultdict(list)
+    if seeded_data:
+        current_date = seeded_data.last_rev + timedelta(days=1)
+        true_cards, sys_cards, card_logs = (
+            list(deepcopy(seeded_data.true_cards).values()),
+            list(deepcopy(seeded_data.sys_cards).values()),
+            deepcopy(seeded_data.logs),
+        )
+    elif seed_history:
+        logs, last_rev = load_anki_history(seed_history, deck_config, deck_name)
+        current_date = last_rev + timedelta(days=1)
+        for cid, logs_list in logs.items():
+            card = Card(card_id=cid)
+            true_cards.append(nature_scheduler.reschedule_card(card, logs_list))
+            sys_cards.append(algo_scheduler.reschedule_card(card, logs_list))
+            card_logs[cid].extend(logs_list)
+    else:
+        current_date = START_DATE
+    return true_cards, sys_cards, card_logs, current_date

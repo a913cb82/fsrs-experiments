@@ -40,8 +40,8 @@ def run_notebook(notebook_path: str) -> None:
         pass
 
 
-@pytest.mark.integration  # type: ignore
-@pytest.mark.parametrize(  # type: ignore
+@pytest.mark.integration  # type: ignore[misc]
+@pytest.mark.parametrize(  # type: ignore[misc]
     "notebook_name",
     [
         "Divergence_Exploration.ipynb",

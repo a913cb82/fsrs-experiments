@@ -39,6 +39,7 @@ python_version = "3.10"
 strict = true
 ignore_missing_imports = true
 check_untyped_defs = true
+exclude = ["fsrs-rs-python-repo/", "fsrs-rs-repo/", "build/"]
 
 [[tool.mypy.overrides]]
 module = [

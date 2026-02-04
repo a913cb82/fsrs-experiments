@@ -34,4 +34,6 @@ class SimulationConfig:
     time_limit: float | None = None
     time_estimator: TimeEstimator | None = None
     rating_estimator: RatingEstimator | None = None
+    compute_final_params: bool = True
+    return_logs: bool = True
     verbose: bool = True
