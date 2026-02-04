@@ -186,21 +186,50 @@ def simulate_day_numpy(
         if config.review_limit is not None:
             due_indices = due_indices[: config.review_limit]
 
-        count = _batch_process_reviews_numpy(
-            deck_sys,
-            deck_true,
-            due_indices,
-            nature_params,
-            algo_params,
-            current_date,
-            desired_retention,
-            rating_estimator,
-            time_estimator,
-            card_logs_acc,
-        )
-        reviews_done += count
-        if count > 0:
-            time_accumulated += float(np.sum(card_logs_acc[-1].review_durations))
+        # Respect time_limit for due reviews
+        if config.time_limit is not None:
+            # Estimate/calculate times BEFORE processing to know where to cut.
+            # But the time_estimator depends on ratings (the review outcome).
+            # For simplicity and performance, we'll get the ratings and times first.
+            ratings_vals = rating_estimator(
+                deck_true,
+                due_indices,
+                current_date,
+                nature_params,
+            )
+            times_vals = time_estimator(
+                deck_true,
+                due_indices,
+                current_date,
+                nature_params,
+                ratings_vals,
+            )
+            cumulative_times = np.cumsum(times_vals)
+            batch_completed = int(
+                np.searchsorted(
+                    cumulative_times,
+                    config.time_limit,
+                    side="right",
+                )
+            )
+            due_indices = due_indices[:batch_completed]
+
+        if len(due_indices) > 0:
+            count = _batch_process_reviews_numpy(
+                deck_sys,
+                deck_true,
+                due_indices,
+                nature_params,
+                algo_params,
+                current_date,
+                desired_retention,
+                rating_estimator,
+                time_estimator,
+                card_logs_acc,
+            )
+            reviews_done += count
+            if count > 0:
+                time_accumulated += float(np.sum(card_logs_acc[-1].review_durations))
 
     new_done = 0
     new_batch_size = 50

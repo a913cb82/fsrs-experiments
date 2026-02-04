@@ -255,3 +255,54 @@ def test_sanity_no_mutation() -> None:
     assert len(seeded_data.true_cards) == initial_card_count
     assert len(seeded_data.logs) == initial_log_count
     assert np.array_equal(seeded_data.true_cards.card_ids[:initial_card_count], cids)
+
+
+def test_sanity_retention_peak() -> None:
+    """
+    Sanity Check 7: Retention Peak under Workload Constraint
+    Verifies that with a fixed time budget, total recall peaks at an intermediate
+    retention target rather than strictly increasing up to 0.99.
+    """
+    from src.anki_utils import DEFAULT_PROB_FIRST_AGAIN
+
+    n_days = 60  # Sufficient time to see effects
+    fixed_duration = 10.0
+    time_limit_sec = 10 * 60  # 10 minutes per day
+
+    def constant_time_estimator(
+        deck: Any, indices: Any, date: Any, params: Any, ratings: Any
+    ) -> Any:
+        return np.full(len(indices), fixed_duration, dtype=np.float32)
+
+    retentions = [0.7, 0.8, 0.9, 0.99]
+    results = []
+
+    for ret in retentions:
+        config = SimulationConfig(
+            n_days=n_days,
+            retention=str(ret),
+            review_limit=None,
+            new_limit=None,  # Unlimited new cards available
+            time_limit=time_limit_sec,
+            time_estimator=constant_time_estimator,
+            verbose=False,
+            compute_final_params=False,
+            return_logs=False,
+            seed=42,
+        )
+        _, _, metrics = run_simulation(config)
+        results.append(metrics)
+
+    # Calculate Adjusted Retention
+    max_cards = max(m["card_count"] for m in results)
+    r_baseline = 1.0 - DEFAULT_PROB_FIRST_AGAIN
+
+    adj_totals = []
+    for m in results:
+        padding = max(0, max_cards - m["card_count"]) * r_baseline
+        adj_totals.append(m["total_retention"] + padding)
+
+    # We expect 0.99 NOT to be the peak.
+    peak_idx = np.argmax(adj_totals)
+    assert retentions[peak_idx] < 0.99
+    assert adj_totals[len(retentions) - 1] < adj_totals[peak_idx]
