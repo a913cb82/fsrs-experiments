@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 import numpy as np
+import pandas as pd
 from tqdm import tqdm
 
 import fsrs_engine
@@ -26,7 +27,7 @@ from utils import (
 
 # Ensure we can import fsrs if it's not in path for some reason
 try:
-    from fsrs import Card, Rating, ReviewLog, Scheduler
+    from fsrs import Card, ReviewLog, Scheduler
     from fsrs.scheduler import DEFAULT_PARAMETERS
 except ImportError:
     import sys
@@ -528,31 +529,50 @@ def run_simulation(
             fitted_params = None
 
         # Final metrics
-        all_logs_final = []
         if config.return_logs:
+            # 1. Process initial logs
+            initial_logs_flat = [
+                log for logs in initial_card_logs.values() for log in logs
+            ]
+            df_initial = pd.DataFrame.from_records(
+                [
+                    {
+                        "card_id": log.card_id,
+                        "rating": int(log.rating),
+                        "review_datetime": log.review_datetime,
+                        "review_duration": log.review_duration,
+                    }
+                    for log in initial_logs_flat
+                ]
+            )
+
+            # 2. Process simulated logs
             if all_card_ids is not None:
                 all_ratings = np.concatenate(card_logs_acc["rating"])
                 all_days = np.concatenate(card_logs_acc["day"])
                 all_durations = np.concatenate(card_logs_acc["duration"])
 
-                # This loop is still slow, but we've already optimized the hot loop
-                for i in range(len(all_card_ids)):
-                    all_logs_final.append(
-                        ReviewLog(
-                            card_id=int(all_card_ids[i]),
-                            rating=Rating(int(all_ratings[i])),
-                            review_datetime=START_DATE
-                            + timedelta(days=int(all_days[i])),
-                            review_duration=int(all_durations[i]),
-                        )
-                    )
+                df_sim = pd.DataFrame(
+                    {
+                        "card_id": all_card_ids,
+                        "rating": all_ratings,
+                        "review_datetime": pd.to_datetime(
+                            all_days, unit="D", origin=START_DATE.replace(tzinfo=None)
+                        ).tz_localize("UTC"),
+                        "review_duration": all_durations,
+                    }
+                )
+                total_logs = pd.concat([df_initial, df_sim], ignore_index=True)
+            else:
+                total_logs = df_initial
+        else:
+            total_logs = pd.DataFrame()
 
-        # total_logs is used by metrics["logs"] and weights calculation
-        # If we didn't return logs, total_logs will just be the initial logs
-        initial_logs_flat = [log for logs in initial_card_logs.values() for log in logs]
-        total_logs = initial_logs_flat + all_logs_final
         metrics = {
-            "review_count": len(initial_logs_flat) + total_simulated_reviews,
+            "review_count": len(total_logs)
+            if config.return_logs
+            else total_simulated_reviews
+            + sum(len(ls) for ls in initial_card_logs.values()),
             "card_count": len(deck_true),
             "stabilities": (
                 deck_true.current_stabilities,

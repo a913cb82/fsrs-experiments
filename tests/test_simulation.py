@@ -184,8 +184,8 @@ def test_run_simulation_with_rating_estimator() -> None:
     _, _, metrics = run_simulation(config)
 
     assert metrics["review_count"] > 0
-    for log in metrics["logs"]:
-        assert log.rating == Rating.Easy
+    for log in metrics["logs"].itertuples():
+        assert log.rating == int(Rating.Easy)
 
 
 def test_run_simulation_with_time_estimator() -> None:
