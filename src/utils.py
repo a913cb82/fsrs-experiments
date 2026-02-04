@@ -34,18 +34,19 @@ def calculate_population_retrievability(
 def calculate_metrics(
     gt_params: list[float] | tuple[float, ...],
     fit_params: list[float] | tuple[float, ...],
-    stabilities: list[tuple[float, float]],
+    s_nat_raw: np.ndarray[Any, Any],
+    s_alg_raw: np.ndarray[Any, Any],
 ) -> tuple[float, float]:
     """
     Calculate RMSE and Mean KL Divergence between ground truth and fitted curves,
     averaged across all individual cards in the simulation using vectorization.
     """
-    if not stabilities:
+    if len(s_nat_raw) == 0:
         return 0.0, 0.0
 
     t_eval = np.linspace(0, 100, 200)  # Shape (T,)
-    s_nat = np.array([max(s[0], 0.001) for s in stabilities])  # Shape (N,)
-    s_alg = np.array([max(s[1], 0.001) for s in stabilities])  # Shape (N,)
+    s_nat = np.maximum(s_nat_raw, 0.001)  # Shape (N,)
+    s_alg = np.maximum(s_alg_raw, 0.001)  # Shape (N,)
 
     # Pre-calculate constants
     decay_nat = -gt_params[20]

@@ -1,10 +1,10 @@
 import sqlite3
 from collections import defaultdict
-from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fsrs import Card, Rating, ReviewLog, Scheduler
+import numpy as np
+from fsrs import Card, Rating, ReviewLog
 from fsrs.scheduler import DEFAULT_PARAMETERS
 
 import src.simulate_fsrs
@@ -166,17 +166,21 @@ def test_run_simulation_with_seeded_data_no_weights() -> None:
 
 def test_run_simulation_with_rating_estimator() -> None:
     def rating_estimator(
-        true_cards: Sequence[Card],
-        current_date: datetime,
-        nature_scheduler: Scheduler,
-    ) -> Sequence[int]:
-        return [4] * len(true_cards)  # Always 'Easy'
+        stabilities: Any,
+        difficulties: Any,
+        date_days: Any,
+        last_reviews: Any,
+        params: Any,
+    ) -> Any:
+        return np.full(len(stabilities), 4, dtype=np.int8)  # Always 'Easy'
+
+    rating_estimator._vectorized = True  # type: ignore
 
     config = SimulationConfig(
         n_days=5,
         review_limit=20,
         new_limit=10,
-        rating_estimator=rating_estimator,
+        rating_estimator=rating_estimator,  # type: ignore
         verbose=False,
     )
     _, _, metrics = run_simulation(config)
@@ -188,18 +192,22 @@ def test_run_simulation_with_rating_estimator() -> None:
 
 def test_run_simulation_with_time_estimator() -> None:
     def time_estimator(
-        true_cards: Sequence[Card],
-        current_date: datetime,
-        ratings: Sequence[int],
-        nature_scheduler: Scheduler,
-    ) -> Sequence[float]:
-        return [5.0] * len(true_cards)  # Always 5 seconds
+        stabilities: Any,
+        difficulties: Any,
+        day_idx: Any,
+        last_reviews: Any,
+        params: Any,
+        ratings: Any,
+    ) -> Any:
+        return np.full(len(stabilities), 5.0)  # Always 5 seconds
+
+    time_estimator._vectorized = True  # type: ignore
 
     config = SimulationConfig(
         n_days=5,
         review_limit=20,
         new_limit=10,
-        time_estimator=time_estimator,
+        time_estimator=time_estimator,  # type: ignore
         verbose=False,
     )
     _, _, metrics = run_simulation(config)
@@ -209,7 +217,7 @@ def test_run_simulation_with_time_estimator() -> None:
     config_with_limit = SimulationConfig(
         n_days=1,
         time_limit=11.0,
-        time_estimator=time_estimator,
+        time_estimator=time_estimator,  # type: ignore
         verbose=False,
     )
     _, _, metrics_limit = run_simulation(config_with_limit)
@@ -385,12 +393,16 @@ def test_parse_parameters_wrong_length() -> None:
 
 def test_simulate_day_time_limit_at_start_of_iter() -> None:
     def time_estimator(
-        true_cards: Sequence[Card],
-        date: datetime,
-        ratings: Sequence[int],
-        nature_scheduler: Scheduler,
-    ) -> Sequence[float]:
-        return [100.0] * len(true_cards)
+        stabilities: Any,
+        difficulties: Any,
+        day_idx: Any,
+        last_reviews: Any,
+        params: Any,
+        ratings: Any,
+    ) -> Any:
+        return np.full(len(stabilities), 100.0)
+
+    time_estimator._vectorized = True  # type: ignore
 
     now = datetime.now(timezone.utc)
     seeded_data = SeededData(
@@ -400,7 +412,10 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
         sys_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
     )
     config = SimulationConfig(
-        n_days=1, time_limit=100.0, time_estimator=time_estimator, verbose=False
+        n_days=1,
+        time_limit=100.0,
+        time_estimator=time_estimator,  # type: ignore
+        verbose=False,
     )
     fitted, _, metrics = run_simulation(config, seeded_data=seeded_data)
     assert metrics["review_count"] == 1
@@ -442,4 +457,6 @@ def test_run_simulation_no_fitted_params(monkeypatch: Any) -> None:
     config = SimulationConfig(n_days=1, verbose=False)
     fitted, _, metrics = run_simulation(config)
     assert fitted is None
-    assert metrics["stabilities"] == []
+    s_nat, s_alg = metrics["stabilities"]
+    assert len(s_nat) > 0
+    assert len(s_alg) > 0

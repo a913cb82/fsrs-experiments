@@ -337,30 +337,9 @@ def _get_estimators_numpy(
 
     # Handle Custom Rating Estimator
     if config.rating_estimator:
-        if getattr(config.rating_estimator, "_vectorized", False):
-            rating_est = config.rating_estimator
-        else:
-
-            def rating_est(
-                stabilities: np.ndarray[Any, Any],
-                difficulties: np.ndarray[Any, Any],
-                date_days: int | np.ndarray[Any, Any],
-                last_reviews: np.ndarray[Any, Any],
-                params: tuple[float, ...],
-            ) -> np.ndarray[Any, Any]:
-                cards = []
-                for s, d, lr in zip(
-                    stabilities, difficulties, last_reviews, strict=False
-                ):
-                    card = Card(stability=s, difficulty=d)
-                    if lr != -1:
-                        card.last_review = START_DATE + timedelta(days=int(lr))
-                    cards.append(card)
-                current_date = START_DATE + timedelta(days=int(date_days))
-                nature_scheduler = Scheduler(parameters=nature_params)
-                return np.array(
-                    config.rating_estimator(cards, current_date, nature_scheduler)
-                )
+        if not getattr(config.rating_estimator, "_vectorized", False):
+            raise ValueError("Rating estimator must be vectorized.")
+        rating_est = config.rating_estimator
     else:
 
         def rating_est(
@@ -399,33 +378,9 @@ def _get_estimators_numpy(
 
     # Handle Custom Time Estimator
     if config.time_estimator:
-        if getattr(config.time_estimator, "_vectorized", False):
-            time_est = config.time_estimator
-        else:
-
-            def time_est(
-                stabilities: np.ndarray[Any, Any],
-                difficulties: np.ndarray[Any, Any],
-                day_idx: int | np.ndarray[Any, Any],
-                last_reviews: np.ndarray[Any, Any],
-                params: tuple[float, ...],
-                ratings: np.ndarray[Any, Any],
-            ) -> np.ndarray[Any, Any]:
-                cards = []
-                for s, d, lr in zip(
-                    stabilities, difficulties, last_reviews, strict=False
-                ):
-                    card = Card(stability=s, difficulty=d)
-                    if lr != -1:
-                        card.last_review = START_DATE + timedelta(days=int(lr))
-                    cards.append(card)
-                current_date = START_DATE + timedelta(days=int(day_idx))
-                nature_scheduler = Scheduler(parameters=nature_params)
-                return np.array(
-                    config.time_estimator(
-                        cards, current_date, ratings.tolist(), nature_scheduler
-                    )
-                )
+        if not getattr(config.time_estimator, "_vectorized", False):
+            raise ValueError("Time estimator must be vectorized.")
+        time_est = config.time_estimator
     else:
 
         def time_est(
@@ -605,7 +560,10 @@ def run_simulation(
         metrics = {
             "review_count": len(initial_logs_flat) + total_simulated_reviews,
             "card_count": len(deck_true),
-            "stabilities": [],
+            "stabilities": (
+                deck_true.current_stabilities,
+                deck_sys.current_stabilities,
+            ),
             "total_retention": np.sum(
                 fsrs_engine.predict_retrievability(
                     deck_true.current_stabilities,

@@ -156,16 +156,20 @@ def test_calculate_population_retrievability() -> None:
 def test_calculate_metrics() -> None:
     gt_params = [0.1] * 21
     fit_params = [0.1] * 21
-    stabilities = [(1.0, 1.0), (5.0, 5.0)]
+    s_nat = np.array([1.0, 5.0])
+    s_alg = np.array([1.0, 5.0])
 
-    rmse, kl = calculate_metrics(gt_params, fit_params, stabilities)
+    rmse, kl = calculate_metrics(gt_params, fit_params, s_nat, s_alg)
     assert rmse == 0.0
     assert kl == 0.0
 
     fit_params_diff = list(gt_params)
     fit_params_diff[20] = 0.5
-    rmse, kl = calculate_metrics(gt_params, fit_params_diff, stabilities)
+    rmse, kl = calculate_metrics(gt_params, fit_params_diff, s_nat, s_alg)
     assert rmse > 0
     assert kl > 0
 
-    assert calculate_metrics(gt_params, fit_params, []) == (0.0, 0.0)
+    assert calculate_metrics(gt_params, fit_params, np.array([]), np.array([])) == (
+        0.0,
+        0.0,
+    )
