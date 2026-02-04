@@ -306,3 +306,46 @@ def test_sanity_retention_peak() -> None:
     peak_idx = np.argmax(adj_totals)
     assert retentions[peak_idx] < 0.99
     assert adj_totals[len(retentions) - 1] < adj_totals[peak_idx]
+
+
+def test_sanity_time_utilization() -> None:
+    """
+    Sanity Check 8: Time Utilization
+    Verifies that the simulator utilizes > 98% of the available time budget
+    when there is an infinite supply of new cards.
+    """
+    n_days = 5
+    time_limit = 600.0  # 10 minutes
+    fixed_duration = 5.0
+
+    def constant_time_estimator(
+        deck: Any, indices: Any, date: Any, params: Any, ratings: Any
+    ) -> Any:
+        return np.full(len(indices), fixed_duration, dtype=np.float32)
+
+    config = SimulationConfig(
+        n_days=n_days,
+        retention="0.9",
+        review_limit=None,
+        new_limit=None,  # Infinite new cards
+        time_limit=time_limit,
+        time_estimator=constant_time_estimator,
+        verbose=False,
+        return_logs=True,
+        seed=42,
+    )
+
+    _, _, metrics = run_simulation(config)
+    logs = metrics["logs"]
+
+    total_time_used = np.sum(logs.review_durations)
+    total_budget = n_days * time_limit
+
+    utilization = total_time_used / total_budget
+
+    # With 5s duration and 600s limit, it should be exact or very close.
+    # 600 / 5 = 120 reviews per day. 120 * 5 = 600. 100% utilization.
+
+    assert utilization > 0.99, f"Utilization {utilization:.4f} is too low"
+    # Allow small float error margin or slight overage if batching logic is aggressive
+    assert utilization <= 1.0, f"Utilization {utilization:.4f} exceeds budget"

@@ -40,6 +40,16 @@ maturin develop --release
 cd ..
 ```
 
+### 3. Provide Your Anki Collection
+
+The analyses read your review history from a `collection.anki2` file in the repository root. This file is your personal Anki database and is **git-ignored — never commit it**. To find it, open Anki desktop and use **Tools → Open Backup Folder** (the collection sits one level up, in the profile folder), or by platform:
+
+- **Windows**: `%APPDATA%\Anki2\<profile>\collection.anki2`
+- **macOS**: `~/Library/Application Support/Anki2/<profile>/collection.anki2`
+- **Linux**: `~/.local/share/Anki2/<profile>/collection.anki2`
+
+Copy it to the repository root as `collection.anki2`. Close Anki first so the file is not locked or mid-sync (Anki rewrites it on exit).
+
 ## Usage
 
 ### Interactive Research

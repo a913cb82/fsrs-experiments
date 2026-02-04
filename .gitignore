@@ -1,25 +1,24 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual Environments
-.venv/
-venv/
-ENV/
-
-# IDEs
-.vscode/
-.idea/
 
 # Build artifacts
-build/
-dist/
-*.egg-info
-
+# Byte-compiled / optimized / DLL files
+# IDEs
 # Project specific
+# Virtual Environments
+*$py.class
+*.egg-info
+*.py[cod]
 .coverage
+.idea/
+.venv/
+.vscode/
+ENV/
+TODO.md
+__pycache__/
+build/
+collection.anki2
+dist/
 forgetting_curve_divergence.png
 fsrs-rs-python-repo/
 fsrs-rs-repo/
-collection.anki2
+requirements.snapshot.txt
+venv/
