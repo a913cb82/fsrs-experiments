@@ -1,5 +1,9 @@
+from typing import Any, TypeVar
+
 import numpy as np
 import numpy.typing as npt
+
+T = TypeVar("T", bound=np.generic)
 
 
 class Deck:
@@ -39,11 +43,18 @@ class Deck:
         n = len(card_ids)
         if self.count + n > len(self.card_ids):
             new_cap = max(len(self.card_ids) * 2, self.count + n)
-            self.card_ids = np.resize(self.card_ids, new_cap)
-            self.stabilities = np.resize(self.stabilities, new_cap)
-            self.difficulties = np.resize(self.difficulties, new_cap)
-            self.dues = np.resize(self.dues, new_cap)
-            self.last_reviews = np.resize(self.last_reviews, new_cap)
+
+            # Helper to grow array and pad with fill value
+            def grow(arr: npt.NDArray[T], cap: int, fill: Any) -> npt.NDArray[T]:
+                new_arr = np.full(cap, fill, dtype=arr.dtype)
+                new_arr[: len(arr)] = arr
+                return new_arr
+
+            self.card_ids = grow(self.card_ids, new_cap, 0)  # type: ignore[assignment]
+            self.stabilities = grow(self.stabilities, new_cap, 0.0)  # type: ignore[assignment]
+            self.difficulties = grow(self.difficulties, new_cap, 0.0)  # type: ignore[assignment]
+            self.dues = grow(self.dues, new_cap, np.datetime64("NaT"))  # type: ignore[assignment]
+            self.last_reviews = grow(self.last_reviews, new_cap, np.datetime64("NaT"))  # type: ignore[assignment]
 
         self.card_ids[self.count : self.count + n] = card_ids
         self.stabilities[self.count : self.count + n] = (
@@ -82,3 +93,15 @@ class Deck:
     @property
     def current_last_reviews(self) -> npt.NDArray[np.datetime64]:
         return self.last_reviews[: self.count]
+
+    def copy(self) -> "Deck":
+        """Returns a copy of the deck with its current state."""
+        new_deck = Deck(
+            card_ids=self.current_card_ids.copy(),
+            stabilities=self.current_stabilities.copy(),
+            difficulties=self.current_difficulties.copy(),
+            dues=self.current_dues.copy(),
+            last_reviews=self.current_last_reviews.copy(),
+            capacity=len(self.card_ids),
+        )
+        return new_deck

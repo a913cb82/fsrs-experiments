@@ -557,9 +557,9 @@ def _load_initial_state(
     if seeded_data:
         current_date = seeded_data.last_rev + timedelta(days=1)
         return (
-            seeded_data.true_cards,
-            seeded_data.sys_cards,
-            seeded_data.logs,
+            seeded_data.true_cards.copy(),
+            seeded_data.sys_cards.copy(),
+            seeded_data.logs.copy(),
             current_date,
         )
 

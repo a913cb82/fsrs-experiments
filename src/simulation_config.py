@@ -41,6 +41,15 @@ class LogData:
     def __len__(self) -> int:
         return len(self.card_ids)
 
+    def copy(self) -> "LogData":
+        """Returns a copy of the LogData with its current state."""
+        return LogData(
+            card_ids=self.card_ids.copy(),
+            ratings=self.ratings.copy(),
+            review_timestamps=self.review_timestamps.copy(),
+            review_durations=self.review_durations.copy(),
+        )
+
     @property
     def is_empty(self) -> bool:
         return len(self.card_ids) == 0
