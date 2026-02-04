@@ -2,36 +2,34 @@ import json
 import sqlite3
 from typing import Any
 
+import numpy as np
 import pytest
 
-from src.anki_utils import START_DATE, load_anki_history
+from src.anki_utils import load_anki_history
 
+# Mock Anki DB path
 TEST_DB = "tests/test_collection.anki2"
 
 
 def test_load_all_history() -> None:
     logs, last_rev = load_anki_history(TEST_DB)
-    assert not logs.empty
-    assert logs["card_id"].nunique() == 2
-    assert last_rev > START_DATE
+    assert not logs.is_empty
+    assert len(np.unique(logs.card_ids)) == 2
+    assert len(logs.ratings) == 5
 
 
 def test_load_by_deck_name() -> None:
     logs, _ = load_anki_history(TEST_DB, deck_name="TestDeck")
-    assert not logs.empty
-    assert logs["card_id"].nunique() == 1
+    assert not logs.is_empty
+    assert len(np.unique(logs.card_ids)) == 1
+    assert len(logs.ratings) == 3
 
 
 def test_load_by_config_name() -> None:
     logs, _ = load_anki_history(TEST_DB, deck_config_name="Default")
-    assert not logs.empty
-    assert logs["card_id"].nunique() == 2
-
-
-def test_load_non_existent_config() -> None:
-    # This should raise SystemExit because of _raise_informative_config_error
-    with pytest.raises(SystemExit):
-        load_anki_history(TEST_DB, deck_config_name="NonExistent")
+    assert not logs.is_empty
+    assert len(np.unique(logs.card_ids)) == 2
+    assert len(logs.ratings) == 5
 
 
 def test_load_old_json_schema(tmp_path: Any) -> None:
@@ -71,9 +69,9 @@ def test_load_old_json_schema(tmp_path: Any) -> None:
     conn.close()
 
     logs, _ = load_anki_history(db_path, deck_config_name="OldConfig")
-    assert not logs.empty
-    assert logs["card_id"].nunique() == 1
-    assert 10 in logs["card_id"].values
+    assert not logs.is_empty
+    assert len(np.unique(logs.card_ids)) == 1
+    assert len(logs.ratings) == 1
 
 
 def test_relational_inheritance(tmp_path: Any) -> None:
@@ -88,7 +86,6 @@ def test_relational_inheritance(tmp_path: Any) -> None:
         "CREATE TABLE decks (id integer primary key, name text, common blob, kind blob)"
     )
     # Parent has config 100 in common blob (field 1)
-    # 0x08 0x64 is protobuf for field 1 = 100
     cur.execute(
         "INSERT INTO decks (id, name, common, kind) VALUES (1, 'Parent', x'0864', x'')"
     )
@@ -118,9 +115,9 @@ def test_relational_inheritance(tmp_path: Any) -> None:
     conn.close()
 
     logs, _ = load_anki_history(db_path, deck_config_name="InheritedConfig")
-    assert not logs.empty
-    assert logs["card_id"].nunique() == 1
-    assert 10 in logs["card_id"].values
+    assert not logs.is_empty
+    assert len(np.unique(logs.card_ids)) == 1
+    assert len(logs.ratings) == 1
 
 
 def test_load_anki_history_warnings(tmp_path: Any) -> None:
@@ -142,11 +139,9 @@ def test_load_anki_history_warnings(tmp_path: Any) -> None:
     cur.execute("CREATE TABLE deck_config (id integer primary key, name text)")
     cur.execute("INSERT INTO deck_config (id, name) VALUES (1, 'Default')")
 
-    # MUST create cards table for informative error logic
     cur.execute("CREATE TABLE cards (id integer primary key, did integer)")
     cur.execute("INSERT INTO cards (id, did) VALUES (1, 1)")
 
-    # MUST create revlog table for other branches
     sql_rev = (
         "CREATE TABLE revlog (id integer primary key, cid integer, "
         "ease integer, type integer, time integer)"
@@ -156,14 +151,12 @@ def test_load_anki_history_warnings(tmp_path: Any) -> None:
     conn.commit()
     conn.close()
 
-    # Trigger config not found error (SystemExit)
     with pytest.raises(SystemExit) as cm:
         load_anki_history(db_path, deck_config_name="NonExistentConfig")
     assert cm.value.code == 1
 
-    # Trigger deck not found warning (should still return empty logs, but it warns)
     logs, _ = load_anki_history(db_path, deck_name="NonExistentDeck")
-    assert logs.empty
+    assert logs.is_empty
 
 
 def test_load_anki_history_malformed_json(tmp_path: Any) -> None:
@@ -181,4 +174,4 @@ def test_load_anki_history_malformed_json(tmp_path: Any) -> None:
     conn.close()
 
     logs, _ = load_anki_history(db_path)
-    assert logs.empty
+    assert logs.is_empty

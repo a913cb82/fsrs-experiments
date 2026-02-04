@@ -1,42 +1,70 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 import numpy as np
-import pandas as pd
-from fsrs import Card
+import numpy.typing as npt
 
-# Vectorized Estimator types (NumPy based)
+from deck import Deck
+
+# Type for FSRS weight vector (usually 21 parameters)
+FSRSParameters: TypeAlias = tuple[float, ...]
+
+
+@dataclass
+class LogData:
+    """Simulation logs stored as NumPy arrays for high-performance."""
+
+    card_ids: npt.NDArray[np.int64]
+    ratings: npt.NDArray[np.int8]
+    review_timestamps: npt.NDArray[np.datetime64]
+    review_durations: npt.NDArray[np.float32]
+
+    @classmethod
+    def concatenate(cls, logs: Sequence["LogData"]) -> "LogData":
+        """Efficiently concatenates multiple LogData instances."""
+        if not logs:
+            return cls(
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.int8),
+                np.array([], dtype="datetime64[ns]"),
+                np.array([], dtype=np.float32),
+            )
+        return cls(
+            np.concatenate([log.card_ids for log in logs]),
+            np.concatenate([log.ratings for log in logs]),
+            np.concatenate([log.review_timestamps for log in logs]),
+            np.concatenate([log.review_durations for log in logs]),
+        )
+
+    def __len__(self) -> int:
+        return len(self.card_ids)
+
+    @property
+    def is_empty(self) -> bool:
+        return len(self.card_ids) == 0
+
+
+# Simplified Vectorized Estimator types
 RatingEstimator: TypeAlias = Callable[
-    [
-        np.ndarray[Any, Any],
-        np.ndarray[Any, Any],
-        int,
-        np.ndarray[Any, Any],
-        tuple[float, ...],
-    ],
-    np.ndarray[Any, Any],
+    [Deck, npt.NDArray[np.intp], datetime, FSRSParameters],
+    npt.NDArray[np.int8],
 ]
 TimeEstimator: TypeAlias = Callable[
-    [
-        np.ndarray[Any, Any],
-        np.ndarray[Any, Any],
-        int,
-        np.ndarray[Any, Any],
-        tuple[float, ...],
-        np.ndarray[Any, Any],
-    ],
-    np.ndarray[Any, Any],
+    [Deck, npt.NDArray[np.intp], datetime, FSRSParameters, npt.NDArray[np.int8]],
+    npt.NDArray[np.float32],
 ]
 
 
 @dataclass
 class SeededData:
-    logs: pd.DataFrame
+    """Pre-loaded simulation state."""
+
+    logs: LogData
     last_rev: datetime
-    true_cards: dict[int, Card]
-    sys_cards: dict[int, Card]
+    true_cards: Deck
+    sys_cards: Deck
 
 
 @dataclass

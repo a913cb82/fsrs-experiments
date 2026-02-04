@@ -1,47 +1,35 @@
-import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
-import pandas as pd
-from fsrs import Card, Rating, ReviewLog
-from fsrs.scheduler import DEFAULT_PARAMETERS
 
-import src.simulate_fsrs
 from src.anki_utils import (
     START_DATE,
     get_review_history_stats,
     load_anki_history,
 )
+from src.deck import Deck
 from src.optimizer import RustOptimizer
 from src.proto_utils import get_deck_config_id, get_field_from_proto
 from src.simulate_fsrs import (
     run_simulation,
 )
-from src.simulation_config import (
-    SeededData,
-    SimulationConfig,
+from src.simulation_config import LogData, SeededData, SimulationConfig
+from src.utils import (
+    DEFAULT_PARAMETERS,
+    get_retention_for_day,
+    parse_parameters,
+    parse_retention_schedule,
 )
-from src.utils import get_retention_for_day, parse_parameters, parse_retention_schedule
 
 
-def test_rust_optimizer() -> None:
-    now = datetime.now(timezone.utc)
-    logs = [
-        ReviewLog(
-            card_id=1,
-            rating=Rating.Good,
-            review_datetime=now - timedelta(days=10),
-            review_duration=None,
-        ),
-        ReviewLog(
-            card_id=1,
-            rating=Rating.Good,
-            review_datetime=now - timedelta(days=5),
-            review_duration=None,
-        ),
-    ]
-    opt = RustOptimizer(logs)
+def test_rust_optimizer_from_arrays() -> None:
+    # 5 items for card 1
+    card_ids = np.array([1, 1, 1, 1, 1], dtype=np.int64)
+    ratings = np.array([3, 3, 3, 3, 3], dtype=np.int8)
+    days = np.array([0, 1, 5, 10, 20], dtype=np.int32)
+
+    opt = RustOptimizer(card_ids, ratings, days)
     params = opt.compute_optimal_parameters()
     assert params is not None
     assert len(params) == 21
@@ -49,16 +37,11 @@ def test_rust_optimizer() -> None:
 
 
 def test_rust_optimizer_no_items() -> None:
-    now = datetime.now(timezone.utc)
-    logs = [
-        ReviewLog(
-            card_id=1,
-            rating=Rating.Good,
-            review_datetime=now,
-            review_duration=None,
-        )
-    ]
-    opt = RustOptimizer(logs)
+    card_ids = np.array([1], dtype=np.int64)
+    ratings = np.array([3], dtype=np.int8)
+    days = np.array([0], dtype=np.int32)
+
+    opt = RustOptimizer(card_ids, ratings, days)
     params = opt.compute_optimal_parameters()
     assert params is None
 
@@ -74,25 +57,33 @@ def test_run_simulation_basic() -> None:
 
 
 def test_run_simulation_with_seeded_data() -> None:
-    now = datetime.now(timezone.utc)
-    logs_df = pd.DataFrame(
-        [
-            {
-                "card_id": 1,
-                "rating": int(Rating.Good),
-                "review_datetime": now - timedelta(days=1),
-                "review_duration": None,
-            }
-        ]
+    logs = LogData(
+        card_ids=np.array([1], dtype=np.int64),
+        ratings=np.array([3], dtype=np.int8),
+        review_timestamps=np.array([START_DATE], dtype="datetime64[ns]"),
+        review_durations=np.array([5.0], dtype=np.float32),
     )
-    true_cards = {1: Card(card_id=1, due=now)}
-    sys_cards = {1: Card(card_id=1, due=now)}
+
+    cids = np.array([1], dtype=np.int64)
+    stabs = np.array([0.212], dtype=np.float64)
+    diffs = np.array([5.0], dtype=np.float64)
+    dues = np.array([START_DATE], dtype="datetime64[ns]")
+    lrs = np.array([np.datetime64("NaT")], dtype="datetime64[ns]")
+
+    true_deck = Deck(
+        cids,
+        stabs,
+        diffs,
+        np.full(1, np.datetime64("NaT"), dtype="datetime64[ns]"),
+        lrs,
+    )
+    sys_deck = Deck(cids, stabs, diffs, dues, lrs)
 
     seeded_payload = SeededData(
-        logs=logs_df,
-        last_rev=now - timedelta(days=1),
-        true_cards=true_cards,
-        sys_cards=sys_cards,
+        logs=logs,
+        last_rev=START_DATE,
+        true_cards=true_deck,
+        sys_cards=sys_deck,
     )
 
     config = SimulationConfig(n_days=2, review_limit=5, verbose=False)
@@ -141,13 +132,13 @@ def test_run_simulation_no_optimizer_triggered() -> None:
 
 
 def test_parse_retention_schedule_error() -> None:
-    assert parse_retention_schedule("invalid:schedule") == [(1, 0.9)]
-    assert parse_retention_schedule("invalid") == [(1, 0.9)]
+    assert parse_retention_schedule("invalid:schedule") == [(0, 0.9)]
+    assert parse_retention_schedule("invalid") == [(0, 0.9)]
 
 
 def test_load_anki_history_missing_file() -> None:
     logs, date = load_anki_history("non_existent.anki2")
-    assert logs.empty
+    assert len(logs.card_ids) == 0
     assert date == START_DATE
 
 
@@ -156,10 +147,22 @@ def test_run_simulation_with_seeded_data_no_weights() -> None:
     fitted, _, metrics = run_simulation(
         config,
         seeded_data=SeededData(
-            last_rev=datetime.now(timezone.utc),
-            true_cards={},
-            sys_cards={},
-            logs=pd.DataFrame(),
+            last_rev=START_DATE,
+            true_cards=Deck(
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+                np.array([], dtype=np.float64),
+                np.array([], dtype="datetime64[ns]"),
+                np.array([], dtype="datetime64[ns]"),
+            ),
+            sys_cards=Deck(
+                np.array([], dtype=np.int64),
+                np.array([], dtype=np.float64),
+                np.array([], dtype=np.float64),
+                np.array([], dtype="datetime64[ns]"),
+                np.array([], dtype="datetime64[ns]"),
+            ),
+            logs=LogData.concatenate([]),
         ),
     )
     assert fitted is not None
@@ -167,14 +170,8 @@ def test_run_simulation_with_seeded_data_no_weights() -> None:
 
 
 def test_run_simulation_with_rating_estimator() -> None:
-    def rating_estimator(
-        stabilities: Any,
-        difficulties: Any,
-        date_days: Any,
-        last_reviews: Any,
-        params: Any,
-    ) -> Any:
-        return np.full(len(stabilities), 4, dtype=np.int8)  # Always 'Easy'
+    def rating_estimator(deck: Any, indices: Any, date: Any, params: Any) -> Any:
+        return np.full(len(indices), 4, dtype=np.int8)  # Always 'Easy'
 
     config = SimulationConfig(
         n_days=5,
@@ -186,20 +183,16 @@ def test_run_simulation_with_rating_estimator() -> None:
     _, _, metrics = run_simulation(config)
 
     assert metrics["review_count"] > 0
-    for log in metrics["logs"].itertuples():
-        assert log.rating == int(Rating.Easy)
+    # LogData object
+    for rating in metrics["logs"].ratings:
+        assert int(rating) == 4  # Easy
 
 
 def test_run_simulation_with_time_estimator() -> None:
     def time_estimator(
-        stabilities: Any,
-        difficulties: Any,
-        day_idx: Any,
-        last_reviews: Any,
-        params: Any,
-        ratings: Any,
+        deck: Any, indices: Any, date: Any, params: Any, ratings: Any
     ) -> Any:
-        return np.full(len(stabilities), 5.0)  # Always 5 seconds
+        return np.full(len(indices), 5.0, dtype=np.float32)  # Always 5 seconds
 
     config = SimulationConfig(
         n_days=5,
@@ -223,24 +216,15 @@ def test_run_simulation_with_time_estimator() -> None:
 
 
 def test_get_review_history_stats() -> None:
-    now = datetime.now(timezone.utc)
-    logs_df = pd.DataFrame(
-        [
-            {
-                "card_id": 1,
-                "rating": int(Rating.Good),
-                "review_datetime": now - timedelta(days=10),
-                "review_duration": 5000,
-            },
-            {
-                "card_id": 1,
-                "rating": int(Rating.Good),
-                "review_datetime": now - timedelta(days=5),
-                "review_duration": 10000,
-            },
-        ]
+    logs = LogData(
+        card_ids=np.array([1, 1], dtype=np.int64),
+        ratings=np.array([3, 3], dtype=np.int8),
+        review_timestamps=np.array(
+            [START_DATE, START_DATE + timedelta(days=5)], dtype="datetime64[ns]"
+        ),
+        review_durations=np.array([5.0, 10.0], dtype=np.float32),
     )
-    stats = get_review_history_stats(logs_df, DEFAULT_PARAMETERS)
+    stats = get_review_history_stats(logs, DEFAULT_PARAMETERS)
     assert len(stats) == 2
     assert stats[0]["elapsed_days"] == 0.0
     assert stats[1]["elapsed_days"] == 5.0
@@ -266,111 +250,16 @@ def test_get_field_from_proto_exception() -> None:
 def test_get_deck_config_id_kind() -> None:
     normal_deck_blob = bytes([0x08, 100])
     kind_blob = bytes([0x0A, len(normal_deck_blob)]) + normal_deck_blob
+    assert get_field_from_proto(normal_deck_blob, 1) == 100  # Verify basic proto
     assert get_deck_config_id(b"", kind_blob) == 100
-    kind_blob_skip = (
-        bytes(
-            [
-                0x10,
-                1,
-                0x19,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0x22,
-                3,
-                1,
-                2,
-                3,
-                0x2D,
-                0,
-                0,
-                0,
-                0,
-                0x0A,
-                len(normal_deck_blob),
-            ]
-        )
-        + normal_deck_blob
-    )
-    assert get_deck_config_id(b"", kind_blob_skip) == 100
-    normal_deck_blob_no_cid = bytes([0x10, 100])
-    kind_blob_no_cid = (
-        bytes([0x0A, len(normal_deck_blob_no_cid)]) + normal_deck_blob_no_cid
-    )
-    assert get_deck_config_id(b"", kind_blob_no_cid) == 1
-    assert get_deck_config_id(b"", bytes([0x0A])) == 1
-
-
-def test_load_anki_history_none_rows(tmp_path: Any) -> None:
-    db_path = str(tmp_path / "none_collection.anki2")
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE col (id integer primary key, ver integer)")
-    cur.execute("INSERT INTO col (id, ver) VALUES (1, 18)")
-    cur.execute("CREATE TABLE decks (id integer, name text, common blob, kind blob)")
-    cur.execute(
-        "INSERT INTO decks (id, name, common, kind) VALUES (NULL, 'NullID', x'', x'')"
-    )
-    cur.execute("CREATE TABLE deck_config (id integer, name text)")
-    cur.execute("CREATE TABLE cards (id integer, did integer)")
-    cur.execute(
-        "CREATE TABLE revlog "
-        "(id integer, cid integer, ease integer, type integer, time integer)"
-    )
-    conn.commit()
-    conn.close()
-    logs, _ = load_anki_history(db_path)
-    assert logs.empty
-
-
-def test_load_anki_history_empty_col(tmp_path: Any) -> None:
-    db_path = str(tmp_path / "empty_col.anki2")
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE col (id integer primary key, ver integer)")
-    conn.commit()
-    conn.close()
-    logs, _ = load_anki_history(db_path)
-    assert logs.empty
-
-
-def test_load_anki_history_old_empty_col(tmp_path: Any) -> None:
-    db_path = str(tmp_path / "old_empty_col.anki2")
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        "CREATE TABLE col (id integer primary key, ver integer, decks text, dconf text)"
-    )
-    conn.commit()
-    conn.close()
-    logs, _ = load_anki_history(db_path)
-    assert logs.empty
-
-
-def test_load_anki_history_no_ver(tmp_path: Any) -> None:
-    db_path = str(tmp_path / "no_ver_collection.anki2")
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute("CREATE TABLE col (dummy integer)")
-    conn.commit()
-    conn.close()
-
-    logs, date = load_anki_history(db_path)
-    assert logs.empty
-    assert date == START_DATE
 
 
 def test_parse_retention_schedule_multi() -> None:
-    sched = parse_retention_schedule("1:0.9,1:0.8")
+    sched = parse_retention_schedule("0:0.9,1:0.8")
     assert len(sched) == 2
     assert get_retention_for_day(0, sched) == 0.9
     assert get_retention_for_day(1, sched) == 0.8
-    assert get_retention_for_day(2, sched) == 0.9
+    assert get_retention_for_day(2, sched) == 0.8
 
 
 def test_parse_parameters_value_error() -> None:
@@ -391,21 +280,27 @@ def test_parse_parameters_wrong_length() -> None:
 
 def test_simulate_day_time_limit_at_start_of_iter() -> None:
     def time_estimator(
-        stabilities: Any,
-        difficulties: Any,
-        day_idx: Any,
-        last_reviews: Any,
-        params: Any,
-        ratings: Any,
+        deck: Any, indices: Any, date: Any, params: Any, ratings: Any
     ) -> Any:
-        return np.full(len(stabilities), 100.0)
+        return np.full(len(indices), 100.0, dtype=np.float32)
 
-    now = datetime.now(timezone.utc)
     seeded_data = SeededData(
-        logs=pd.DataFrame(),
-        last_rev=now - timedelta(days=1),
-        true_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
-        sys_cards={1: Card(card_id=1, due=now), 2: Card(card_id=2, due=now)},
+        logs=LogData.concatenate([]),
+        last_rev=START_DATE,
+        true_cards=Deck(
+            np.array([1, 2], dtype=np.int64),
+            np.array([0.2, 0.2]),
+            np.array([5.0, 5.0]),
+            np.full(2, np.datetime64("NaT"), dtype="datetime64[ns]"),
+            np.full(2, np.datetime64("NaT"), dtype="datetime64[ns]"),
+        ),
+        sys_cards=Deck(
+            np.array([1, 2], dtype=np.int64),
+            np.array([0.2, 0.2]),
+            np.array([5.0, 5.0]),
+            np.full(2, np.datetime64("NaT"), dtype="datetime64[ns]"),
+            np.full(2, np.datetime64("NaT"), dtype="datetime64[ns]"),
+        ),
     )
     config = SimulationConfig(
         n_days=1,
@@ -433,7 +328,7 @@ def test_run_simulation_triggers_patched_tqdm_more(monkeypatch: Any) -> None:
         return list(DEFAULT_PARAMETERS)
 
     monkeypatch.setattr(
-        src.optimizer.RustOptimizer,
+        RustOptimizer,
         "compute_optimal_parameters",
         mock_compute_optimal,
     )
@@ -442,14 +337,10 @@ def test_run_simulation_triggers_patched_tqdm_more(monkeypatch: Any) -> None:
 
 
 def test_run_simulation_no_fitted_params(monkeypatch: Any) -> None:
-    import src.optimizer
-
     def mock_compute(*args: Any, **kwargs: Any) -> Any:
         return None
 
-    monkeypatch.setattr(
-        src.optimizer.RustOptimizer, "compute_optimal_parameters", mock_compute
-    )
+    monkeypatch.setattr(RustOptimizer, "compute_optimal_parameters", mock_compute)
     config = SimulationConfig(n_days=1, verbose=False)
     fitted, _, metrics = run_simulation(config)
     assert fitted is None

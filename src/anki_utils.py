@@ -4,17 +4,20 @@ import os
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, cast
 
+import numpy as np
+import numpy.typing as npt
 import pandas as pd
-from fsrs import Card, Rating, Scheduler
 from tqdm import tqdm
 
+import fsrs_engine
 from proto_utils import get_deck_config_id
+from simulation_config import FSRSParameters, LogData
 
 # Constants for Anki processing
-START_DATE = datetime(2023, 1, 1, tzinfo=timezone.utc)
+START_DATE = datetime(2023, 1, 1)
 
 # Weights for new cards (first review ratings) - Defaults
 DEFAULT_PROB_FIRST_AGAIN = 0.5
@@ -34,7 +37,7 @@ class RatingWeights:
     success: list[float] = field(default_factory=lambda: [0.1, 0.8, 0.1])
 
 
-def calculate_expected_d0(weights: list[float], parameters: tuple[float, ...]) -> float:
+def calculate_expected_d0(weights: list[float], parameters: FSRSParameters) -> float:
     """
     Calculates expected initial difficulty E[D0(G)] based on first-rating
     distribution and FSRS v6 parameters w4, w5.
@@ -44,7 +47,8 @@ def calculate_expected_d0(weights: list[float], parameters: tuple[float, ...]) -
     w5 = parameters[5]
     # G values: 1 (Again), 2 (Hard), 3 (Good), 4 (Easy)
     d0_vals = [w4 - math.exp(w5 * (g - 1)) + 1 for g in [1, 2, 3, 4]]
-    return sum(p * d for p, d in zip(weights, d0_vals, strict=False))
+    res = sum(p * d for p, d in zip(weights, d0_vals, strict=False))
+    return float(res)
 
 
 def _get_anki_schema_version(cur: sqlite3.Cursor) -> int:
@@ -197,15 +201,20 @@ def load_anki_history(
     path: str,
     deck_config_name: str | None = None,
     deck_name: str | None = None,
-) -> tuple[pd.DataFrame, datetime]:
+) -> tuple[LogData, datetime]:
     """
     Extracts FSRS-compatible review logs from an Anki collection.anki2 file.
-    Supports both old (JSON-in-col) and new (relational tables) schemas.
-    Returns a DataFrame with columns: card_id, rating, review_datetime, review_duration
+    Returns LogData containing NumPy arrays.
     """
+    empty_logs = LogData(
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.int8),
+        np.array([], dtype="datetime64[ns]"),
+        np.array([], dtype=np.float32),
+    )
     if not os.path.exists(path):
         tqdm.write(f"Error: Anki database not found at {path}")
-        return pd.DataFrame(), START_DATE
+        return empty_logs, START_DATE
 
     conn = sqlite3.connect(path)
     cur = conn.cursor()
@@ -223,12 +232,12 @@ def load_anki_history(
 
         if not valid_deck_ids:
             tqdm.write("Warning: No matching decks found for filtering criteria.")
-            return pd.DataFrame(), START_DATE
+            return empty_logs, START_DATE
 
         tqdm.write(f"Querying reviews for {len(valid_deck_ids)} matching decks...")
         placeholders = ",".join(["?" for _ in valid_deck_ids])
         query = f"""
-            SELECT r.cid, r.ease, r.id, r.type, r.time
+            SELECT r.cid, r.ease, r.id, r.time
             FROM revlog r
             JOIN cards c ON r.cid = c.id
             WHERE r.ease BETWEEN 1 AND 4
@@ -239,50 +248,54 @@ def load_anki_history(
         rows = cur.fetchall()
     except (sqlite3.OperationalError, json.JSONDecodeError) as e:
         tqdm.write(f"Error reading Anki database: {e}")
-        return pd.DataFrame(), START_DATE
+        return empty_logs, START_DATE
     finally:
         conn.close()
 
     if not rows:
-        return pd.DataFrame(), START_DATE
+        return empty_logs, START_DATE
 
-    df = pd.DataFrame(
-        rows, columns=["card_id", "rating", "id", "type", "review_duration"]
+    df = pd.DataFrame(rows, columns=["card_id", "rating", "id", "review_duration"])
+
+    card_ids = df["card_id"].values.astype(np.int64)
+    ratings = df["rating"].values.astype(np.int8)
+    review_timestamps_raw = pd.to_datetime(df["id"], unit="ms", utc=False)
+    review_timestamps = cast(
+        npt.NDArray[np.datetime64],
+        review_timestamps_raw.values.astype("datetime64[ns]"),
     )
-    df["review_datetime"] = pd.to_datetime(df["id"], unit="ms", utc=True)
-    df["rating"] = df["rating"].astype(int)
-    # duration can be None if duration_ms is 0 or null
-    df["review_duration"] = df["review_duration"].apply(lambda x: int(x) if x else None)
+    durations = df["review_duration"].fillna(0).values.astype(np.float32)
 
-    last_review_time = df["review_datetime"].max()
-    first_review_time = df["review_datetime"].min()
+    last_review_time = pd.to_datetime(np.max(review_timestamps)).to_pydatetime()
 
-    t_df = df[["card_id", "rating", "review_datetime", "review_duration"]]
+    t_logs = LogData(card_ids, ratings, review_timestamps, durations)
 
     tqdm.write(
         f"Successfully loaded {len(df)} reviews for {df['card_id'].nunique()} cards."
     )
-    tqdm.write(
-        f"Review date range: {first_review_time.date()} to {last_review_time.date()}"
-    )
 
-    return t_df, last_review_time
+    return t_logs, last_review_time
 
 
 def infer_review_weights(
-    card_logs: pd.DataFrame,
+    card_logs: LogData,
 ) -> RatingWeights:
     """
     Infers rating probabilities from real review history.
-    card_logs is a DataFrame with [card_id, rating, review_datetime]
     """
-    if card_logs.empty:
+    if len(card_logs.card_ids) == 0:
         return RatingWeights()
 
-    sorted_df = card_logs.sort_values("review_datetime").copy()
-    sorted_df["rank"] = sorted_df.groupby("card_id")["review_datetime"].rank(
-        method="first"
+    df = pd.DataFrame(
+        {
+            "card_id": card_logs.card_ids,
+            "rating": card_logs.ratings,
+            "timestamp": card_logs.review_timestamps,
+        }
     )
+
+    sorted_df = df.sort_values(["card_id", "timestamp"]).copy()
+    sorted_df["rank"] = sorted_df.groupby("card_id")["timestamp"].rank(method="first")
 
     first_reviews = sorted_df[sorted_df["rank"] == 1]
     subsequent_reviews = sorted_df[sorted_df["rank"] > 1]
@@ -295,44 +308,30 @@ def infer_review_weights(
         success_subsequent["rating"].value_counts().reindex([2, 3, 4], fill_value=0)
     )
 
-    # Normalize First Ratings
+    # Normalize
     total_first = first_ratings_counts.sum()
     if total_first > 0:
         first_weights = (first_ratings_counts / total_first).tolist()
     else:
-        first_weights = [
-            DEFAULT_PROB_FIRST_AGAIN,
-            DEFAULT_PROB_FIRST_HARD,
-            DEFAULT_PROB_FIRST_GOOD,
-            DEFAULT_PROB_FIRST_EASY,
-        ]
+        first_weights = [0.5, 0.1, 0.3, 0.1]
 
-    # Normalize Success Ratings
     total_success = success_ratings_counts.sum()
     if total_success > 0:
         success_weights = (success_ratings_counts / total_success).tolist()
     else:
-        success_weights = [
-            DEFAULT_PROB_HARD,
-            DEFAULT_PROB_GOOD,
-            DEFAULT_PROB_EASY,
-        ]
+        success_weights = [0.1, 0.8, 0.1]
 
     return RatingWeights(first=first_weights, success=success_weights)
 
 
 def get_review_history_stats(
-    card_logs: pd.DataFrame,
-    parameters: tuple[float, ...],
+    card_logs: LogData,
+    parameters: FSRSParameters,
 ) -> list[dict[str, Any]]:
     """
     Replays review history using provided parameters and returns a list of
-    stats for each review (retention, rating, duration, etc).
-    Includes first reviews (new cards) with stability 0.0 and expected D0.
+    stats for each review.
     """
-    scheduler = Scheduler(parameters=parameters)
-
-    # Inferred features for new cards
     weights_inf = infer_review_weights(card_logs)
     w_first = weights_inf.first
     prob_first_success = 1.0 - w_first[0]
@@ -340,42 +339,82 @@ def get_review_history_stats(
 
     stats = []
 
-    for cid, group in card_logs.groupby("card_id"):
-        sorted_group = group.sort_values("review_datetime")
+    df = pd.DataFrame(
+        {
+            "card_id": card_logs.card_ids,
+            "rating": card_logs.ratings,
+            "timestamp": card_logs.review_timestamps,
+            "duration": card_logs.review_durations,
+        }
+    )
 
-        card = Card(card_id=cid)
-        # Replay history
+    for cid, group in df.groupby("card_id"):
+        sorted_group = group.sort_values("timestamp")
+
+        stab: float = 0.0
+        diff: float = 0.0
+        last_review_ts: np.datetime64 | None = None
+
         for i, row in enumerate(sorted_group.itertuples()):
+            rat = int(cast(Any, row).rating)
+            ts = cast(np.datetime64, row.timestamp)
+
             if i == 0:
-                # Features for a BRAND NEW card
                 ret = prob_first_success
-                stab = 0.0
-                diff = expected_d0
+                stab_val = 0.0
+                diff_val = expected_d0
                 elapsed = 0.0
+                stab = float(
+                    fsrs_engine.init_stability(
+                        np.array([rat], dtype=np.int8), parameters
+                    )[0]
+                )
+                diff = float(
+                    fsrs_engine.init_difficulty(
+                        np.array([rat], dtype=np.int8), parameters
+                    )[0]
+                )
             else:
-                # Retention at the time of THIS review
-                ret = scheduler.get_card_retrievability(card, row.review_datetime)
-                stab = card.stability
-                diff = card.difficulty
-                elapsed = (
-                    row.review_datetime - card.last_review
-                ).total_seconds() / 86400.0
+                elapsed = float((ts - last_review_ts) / np.timedelta64(1, "D"))
+                ret = float(
+                    fsrs_engine.predict_retrievability(
+                        np.array([stab], dtype=np.float64),
+                        np.array([elapsed], dtype=np.float64),
+                        parameters,
+                    )[0]
+                )
+                stab_val = stab
+                diff_val = diff
+
+                if rat == 1:
+                    stab_arr, diff_arr = fsrs_engine.update_state_forget(
+                        np.array([stab], dtype=np.float64),
+                        np.array([diff], dtype=np.float64),
+                        np.array([ret], dtype=np.float64),
+                        parameters,
+                    )
+                else:
+                    stab_arr, diff_arr = fsrs_engine.update_state_recall(
+                        np.array([stab], dtype=np.float64),
+                        np.array([diff], dtype=np.float64),
+                        np.array([rat], dtype=np.int8),
+                        np.array([ret], dtype=np.float64),
+                        parameters,
+                    )
+                stab = float(stab_arr[0])
+                diff = float(diff_arr[0])
 
             stats.append(
                 {
                     "card_id": cid,
                     "retention": ret,
-                    "rating": int(cast(Any, row).rating),
-                    "duration": row.review_duration,
-                    "stability": stab,
-                    "difficulty": diff,
+                    "rating": rat,
+                    "duration": cast(Any, row).duration,
+                    "stability": stab_val,
+                    "difficulty": diff_val,
                     "elapsed_days": elapsed,
                 }
             )
-
-            # Update card state for the NEXT review
-            card, _ = scheduler.review_card(
-                card, Rating(int(cast(Any, row).rating)), row.review_datetime
-            )
+            last_review_ts = ts
 
     return stats

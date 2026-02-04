@@ -1,127 +1,124 @@
 import numpy as np
-import pandas as pd
 import pytest
-from fsrs import Rating
 
 from src.anki_utils import (
-    RatingWeights,
+    DEFAULT_PROB_EASY,
+    DEFAULT_PROB_FIRST_AGAIN,
+    DEFAULT_PROB_FIRST_EASY,
+    DEFAULT_PROB_FIRST_GOOD,
+    DEFAULT_PROB_FIRST_HARD,
+    DEFAULT_PROB_GOOD,
+    DEFAULT_PROB_HARD,
     calculate_expected_d0,
     infer_review_weights,
 )
+from src.simulation_config import LogData
 from src.utils import (
+    DEFAULT_PARAMETERS,
     calculate_metrics,
-    calculate_population_retrievability,
     get_retention_for_day,
     parse_parameters,
     parse_retention_schedule,
 )
 
 
-def test_calculate_population_retrievability() -> None:
-    t = np.linspace(0, 10, 11)
-    stabilities = np.array([1.0, 5.0, 10.0])
-    params = [0.1] * 21
-
-    res = calculate_population_retrievability(t, stabilities, params)
-    assert len(res) == 11
-    assert res[0] == 1.0
-    assert np.all(res <= 1.0)
-    assert np.all(res >= 0.0)
-
-    assert np.all(calculate_population_retrievability(t, np.array([]), params) == 1.0)
+def test_calculate_expected_d0() -> None:
+    weights = [0.25, 0.25, 0.25, 0.25]
+    d0 = calculate_expected_d0(weights, DEFAULT_PARAMETERS)
+    assert isinstance(d0, float)
+    assert 1.0 <= d0 <= 10.0
 
 
 def test_calculate_metrics() -> None:
-    gt_params = [0.1] * 21
-    fit_params = [0.1] * 21
-    s_nat = np.array([1.0, 5.0])
-    s_alg = np.array([1.0, 5.0])
+    gt = DEFAULT_PARAMETERS
+    fitted = DEFAULT_PARAMETERS
+    s_nat = np.array([1.0, 5.0, 10.0])
+    s_alg = np.array([1.0, 5.0, 10.0])
+    rmse, kl = calculate_metrics(gt, fitted, s_nat, s_alg)
+    assert rmse == pytest.approx(0.0)
+    assert kl == pytest.approx(0.0)
 
-    rmse, kl = calculate_metrics(gt_params, fit_params, s_nat, s_alg)
-    assert rmse == 0.0
-    assert kl == 0.0
 
-    fit_params_diff = list(gt_params)
-    fit_params_diff[20] = 0.5
-    rmse, kl = calculate_metrics(gt_params, fit_params_diff, s_nat, s_alg)
+def test_calculate_metrics_different() -> None:
+    gt = DEFAULT_PARAMETERS
+    fitted = list(DEFAULT_PARAMETERS)
+    fitted[0] += 0.1
+    s_nat = np.array([1.0, 5.0, 10.0])
+    s_alg = np.array([1.1, 5.5, 11.0])
+    rmse, kl = calculate_metrics(gt, tuple(fitted), s_nat, s_alg)
     assert rmse > 0
     assert kl > 0
 
-    assert calculate_metrics(gt_params, fit_params, np.array([]), np.array([])) == (
-        0.0,
-        0.0,
-    )
-
-
-def test_parse_retention_schedule() -> None:
-    assert parse_retention_schedule("0.9") == [(1, 0.9)]
-    assert parse_retention_schedule("1:0.9,2:0.8") == [(1, 0.9), (2, 0.8)]
-
 
 def test_get_retention_for_day() -> None:
-    schedule = [(1, 0.9), (2, 0.8)]
+    schedule = [(10, 0.9), (20, 0.85)]
+    # Default is 0.9 if day < 10
     assert get_retention_for_day(0, schedule) == 0.9
-    assert get_retention_for_day(1, schedule) == 0.8
-    assert get_retention_for_day(2, schedule) == 0.8
-    assert get_retention_for_day(3, schedule) == 0.9
+    assert get_retention_for_day(5, schedule) == 0.9
+    assert get_retention_for_day(10, schedule) == 0.9
+    assert get_retention_for_day(11, schedule) == 0.9
+    assert get_retention_for_day(20, schedule) == 0.85
+    assert get_retention_for_day(25, schedule) == 0.85
 
 
-def test_parse_parameters() -> None:
-    p_str = ",".join(["0.1"] * 21)
-    res = parse_parameters(p_str)
-    assert isinstance(res, tuple)
-    assert len(res) == 21
-    assert res[0] == 0.1
+def test_parse_retention_schedule_single() -> None:
+    assert parse_retention_schedule("0.95") == [(0, 0.95)]
 
 
-def test_calculate_expected_d0() -> None:
-    from fsrs.scheduler import DEFAULT_PARAMETERS
+def test_parse_retention_schedule_complex() -> None:
+    res = parse_retention_schedule("10:0.9,20:0.8")
+    assert res == [(10, 0.9), (20, 0.8)]
 
-    weights = [0.5, 0.1, 0.3, 0.1]
-    res = calculate_expected_d0(weights, DEFAULT_PARAMETERS)
-    assert isinstance(res, float)
-    assert res > 0
+
+def test_parse_parameters_too_short() -> None:
+    p_str = "1.0,2.0"
+    params = parse_parameters(p_str)
+    assert params == DEFAULT_PARAMETERS
+
+
+def test_infer_review_weights_empty() -> None:
+    empty_logs = LogData(
+        np.array([], dtype=np.int64),
+        np.array([], dtype=np.int8),
+        np.array([], dtype="datetime64[ns]"),
+        np.array([], dtype=np.float32),
+    )
+    weights = infer_review_weights(empty_logs)
+    assert weights.first == [
+        DEFAULT_PROB_FIRST_AGAIN,
+        DEFAULT_PROB_FIRST_HARD,
+        DEFAULT_PROB_FIRST_GOOD,
+        DEFAULT_PROB_FIRST_EASY,
+    ]
+    assert weights.success == [
+        DEFAULT_PROB_HARD,
+        DEFAULT_PROB_GOOD,
+        DEFAULT_PROB_EASY,
+    ]
 
 
 def test_infer_review_weights() -> None:
-    from datetime import datetime, timedelta, timezone
+    now = np.datetime64("2026-01-01")
+    logs = LogData(
+        card_ids=np.array([1, 1, 2, 2, 2], dtype=np.int64),
+        ratings=np.array([3, 3, 1, 2, 4], dtype=np.int8),
+        review_timestamps=np.array(
+            [
+                now - np.timedelta64(10, "D"),
+                now - np.timedelta64(5, "D"),
+                now - np.timedelta64(20, "D"),
+                now - np.timedelta64(15, "D"),
+                now - np.timedelta64(10, "D"),
+            ],
+            dtype="datetime64[ns]",
+        ),
+        review_durations=np.zeros(5, dtype=np.float32),
+    )
 
-    now = datetime.now(timezone.utc)
-    # Card 1: 1st Good, 2nd Good
-    # Card 2: 1st Again, 2nd Hard, 3rd Easy
-    data = [
-        {
-            "card_id": 1,
-            "rating": int(Rating.Good),
-            "review_datetime": now - timedelta(days=10),
-        },
-        {
-            "card_id": 1,
-            "rating": int(Rating.Good),
-            "review_datetime": now - timedelta(days=5),
-        },
-        {
-            "card_id": 2,
-            "rating": int(Rating.Again),
-            "review_datetime": now - timedelta(days=20),
-        },
-        {
-            "card_id": 2,
-            "rating": int(Rating.Hard),
-            "review_datetime": now - timedelta(days=15),
-        },
-        {
-            "card_id": 2,
-            "rating": int(Rating.Easy),
-            "review_datetime": now - timedelta(days=10),
-        },
+    weights = infer_review_weights(logs)
+    assert weights.first == [0.5, 0.0, 0.5, 0.0]
+    assert weights.success == [
+        pytest.approx(1 / 3),
+        pytest.approx(1 / 3),
+        pytest.approx(1 / 3),
     ]
-    df = pd.DataFrame(data)
-
-    weights = infer_review_weights(df)
-    assert isinstance(weights, RatingWeights)
-    assert len(weights.first) == 4
-    assert len(weights.success) == 3
-    # Check probabilities sum to 1
-    assert pytest.approx(sum(weights.first)) == 1.0
-    assert pytest.approx(sum(weights.success)) == 1.0

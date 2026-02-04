@@ -1,6 +1,9 @@
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
+import numpy.typing as npt
+
+from simulation_config import FSRSParameters
 
 MIN_DIFFICULTY = 1.0
 MAX_DIFFICULTY = 10.0
@@ -8,10 +11,10 @@ STABILITY_MIN = 0.001
 
 
 def predict_retrievability(
-    stabilities: np.ndarray[Any, Any],
-    elapsed_days: np.ndarray[Any, Any],
-    params: tuple[float, ...],
-) -> np.ndarray[Any, Any]:
+    stabilities: npt.NDArray[np.float64],
+    elapsed_days: npt.NDArray[np.float64],
+    params: FSRSParameters,
+) -> npt.NDArray[np.float64]:
     """Vectorized retrievability prediction using FSRS v6 formulas."""
     decay = -params[20]
     factor = 0.9 ** (1.0 / decay) - 1.0
@@ -21,40 +24,40 @@ def predict_retrievability(
     # Base must be positive for power operation
     res = np.maximum(base, 1e-10) ** decay
     return cast(
-        np.ndarray[Any, Any], np.where(stabilities > 0, res, 0.0).astype(np.float64)
+        npt.NDArray[np.float64], np.where(stabilities > 0, res, 0.0).astype(np.float64)
     )
 
 
 def init_stability(
-    ratings: np.ndarray[Any, Any], params: tuple[float, ...]
-) -> np.ndarray[Any, Any]:
+    ratings: npt.NDArray[np.int8], params: FSRSParameters
+) -> npt.NDArray[np.float64]:
     """Vectorized initial stability using FSRS v6 formulas."""
     # ratings are 1, 2, 3, 4 (Again, Hard, Good, Easy)
     # params[0..3] are initial stabilities
     params_arr = np.array(params)
     return cast(
-        np.ndarray[Any, Any],
+        npt.NDArray[np.float64],
         np.maximum(params_arr[ratings - 1], STABILITY_MIN).astype(np.float64),
     )
 
 
 def init_difficulty(
-    ratings: np.ndarray[Any, Any], params: tuple[float, ...]
-) -> np.ndarray[Any, Any]:
+    ratings: npt.NDArray[np.int8], params: FSRSParameters
+) -> npt.NDArray[np.float64]:
     """Vectorized initial difficulty using FSRS v6 formulas."""
     # D0(r) = w4 - exp(w5 * (r-1)) + 1
     d0 = params[4] - np.exp(params[5] * (ratings - 1.0)) + 1.0
     return cast(
-        np.ndarray[Any, Any],
+        npt.NDArray[np.float64],
         np.clip(d0, MIN_DIFFICULTY, MAX_DIFFICULTY).astype(np.float64),
     )
 
 
 def _next_difficulty(
-    difficulties: np.ndarray[Any, Any],
-    ratings: np.ndarray[Any, Any],
-    params: tuple[float, ...],
-) -> np.ndarray[Any, Any]:
+    difficulties: npt.NDArray[np.float64],
+    ratings: npt.NDArray[np.int8],
+    params: FSRSParameters,
+) -> npt.NDArray[np.float64]:
     """Helper for difficulty updates."""
     # arg_1 = initial_difficulty(Easy, clamp=False)
     # Easy rating is 4
@@ -67,18 +70,18 @@ def _next_difficulty(
     # next_difficulty = w7 * arg_1 + (1 - w7) * arg_2
     next_d = params[7] * arg_1 + (1.0 - params[7]) * arg_2
     return cast(
-        np.ndarray[Any, Any],
+        npt.NDArray[np.float64],
         np.clip(next_d, MIN_DIFFICULTY, MAX_DIFFICULTY).astype(np.float64),
     )
 
 
 def update_state_recall(
-    stabilities: np.ndarray[Any, Any],
-    difficulties: np.ndarray[Any, Any],
-    ratings: np.ndarray[Any, Any],
-    retrievabilities: np.ndarray[Any, Any],
-    params: tuple[float, ...],
-) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    stabilities: npt.NDArray[np.float64],
+    difficulties: npt.NDArray[np.float64],
+    ratings: npt.NDArray[np.int8],
+    retrievabilities: npt.NDArray[np.float64],
+    params: FSRSParameters,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Vectorized recall update using FSRS v6 formulas."""
     # S' = S * [1 + exp(w8) * (11-D) * S^-w9 * (exp(w10 * (1-R)) - 1) * penalty * bonus]
     hard_penalty = np.where(ratings == 2, params[15], 1.0)  # Rating.Hard = 2
@@ -98,17 +101,19 @@ def update_state_recall(
     new_d = _next_difficulty(difficulties, ratings, params)
 
     return (
-        cast(np.ndarray[Any, Any], np.maximum(new_s, STABILITY_MIN).astype(np.float64)),
-        cast(np.ndarray[Any, Any], new_d.astype(np.float64)),
+        cast(
+            npt.NDArray[np.float64], np.maximum(new_s, STABILITY_MIN).astype(np.float64)
+        ),
+        cast(npt.NDArray[np.float64], new_d.astype(np.float64)),
     )
 
 
 def update_state_forget(
-    stabilities: np.ndarray[Any, Any],
-    difficulties: np.ndarray[Any, Any],
-    retrievabilities: np.ndarray[Any, Any],
-    params: tuple[float, ...],
-) -> tuple[np.ndarray[Any, Any], np.ndarray[Any, Any]]:
+    stabilities: npt.NDArray[np.float64],
+    difficulties: npt.NDArray[np.float64],
+    retrievabilities: npt.NDArray[np.float64],
+    params: FSRSParameters,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
     """Vectorized forget update using FSRS v6 formulas."""
     # S'_long = w11 * D^-w12 * ((S+1)^w13 - 1) * exp(w14 * (1-R))
     s_long = (
@@ -123,26 +128,28 @@ def update_state_forget(
 
     new_s = np.minimum(s_long, s_short)
     # Rating.Again = 1
-    new_d = _next_difficulty(difficulties, np.array([1.0]), params)
+    new_d = _next_difficulty(difficulties, np.array([1], dtype=np.int8), params)
 
     return (
-        cast(np.ndarray[Any, Any], np.maximum(new_s, STABILITY_MIN).astype(np.float64)),
-        cast(np.ndarray[Any, Any], new_d.astype(np.float64)),
+        cast(
+            npt.NDArray[np.float64], np.maximum(new_s, STABILITY_MIN).astype(np.float64)
+        ),
+        cast(npt.NDArray[np.float64], new_d.astype(np.float64)),
     )
 
 
 def next_interval(
-    stabilities: np.ndarray[Any, Any],
+    stabilities: npt.NDArray[np.float64],
     desired_retention: float,
-    params: tuple[float, ...],
+    params: FSRSParameters,
     max_interval: int = 36500,
-) -> np.ndarray[Any, Any]:
+) -> npt.NDArray[np.int32]:
     """Vectorized next interval calculation."""
     decay = -params[20]
     factor = 0.9 ** (1.0 / decay) - 1.0
 
     intervals = (stabilities / factor) * (desired_retention ** (1.0 / decay) - 1.0)
     return cast(
-        np.ndarray[Any, Any],
+        npt.NDArray[np.int32],
         np.clip(np.round(intervals), 1, max_interval).astype(np.int32),
     )
