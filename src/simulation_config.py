@@ -1,17 +1,32 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
-from fsrs import Card, ReviewLog, Scheduler
+import numpy as np
+from fsrs import Card, ReviewLog
 
-# Batch Estimator types
-# Takes a list of Cards and returns a list of results
+# Vectorized Estimator types (NumPy based)
 RatingEstimator: TypeAlias = Callable[
-    [Sequence[Card], datetime, Scheduler], Sequence[int]
+    [
+        np.ndarray[Any, Any],
+        np.ndarray[Any, Any],
+        int,
+        np.ndarray[Any, Any],
+        tuple[float, ...],
+    ],
+    np.ndarray[Any, Any],
 ]
 TimeEstimator: TypeAlias = Callable[
-    [Sequence[Card], datetime, Sequence[int], Scheduler], Sequence[float]
+    [
+        np.ndarray[Any, Any],
+        np.ndarray[Any, Any],
+        int,
+        np.ndarray[Any, Any],
+        tuple[float, ...],
+        np.ndarray[Any, Any],
+    ],
+    np.ndarray[Any, Any],
 ]
 
 

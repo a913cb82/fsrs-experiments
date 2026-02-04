@@ -174,13 +174,11 @@ def test_run_simulation_with_rating_estimator() -> None:
     ) -> Any:
         return np.full(len(stabilities), 4, dtype=np.int8)  # Always 'Easy'
 
-    rating_estimator._vectorized = True  # type: ignore
-
     config = SimulationConfig(
         n_days=5,
         review_limit=20,
         new_limit=10,
-        rating_estimator=rating_estimator,  # type: ignore
+        rating_estimator=rating_estimator,
         verbose=False,
     )
     _, _, metrics = run_simulation(config)
@@ -201,13 +199,11 @@ def test_run_simulation_with_time_estimator() -> None:
     ) -> Any:
         return np.full(len(stabilities), 5.0)  # Always 5 seconds
 
-    time_estimator._vectorized = True  # type: ignore
-
     config = SimulationConfig(
         n_days=5,
         review_limit=20,
         new_limit=10,
-        time_estimator=time_estimator,  # type: ignore
+        time_estimator=time_estimator,
         verbose=False,
     )
     _, _, metrics = run_simulation(config)
@@ -217,7 +213,7 @@ def test_run_simulation_with_time_estimator() -> None:
     config_with_limit = SimulationConfig(
         n_days=1,
         time_limit=11.0,
-        time_estimator=time_estimator,  # type: ignore
+        time_estimator=time_estimator,
         verbose=False,
     )
     _, _, metrics_limit = run_simulation(config_with_limit)
@@ -402,8 +398,6 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
     ) -> Any:
         return np.full(len(stabilities), 100.0)
 
-    time_estimator._vectorized = True  # type: ignore
-
     now = datetime.now(timezone.utc)
     seeded_data = SeededData(
         logs=defaultdict(list),
@@ -414,7 +408,7 @@ def test_simulate_day_time_limit_at_start_of_iter() -> None:
     config = SimulationConfig(
         n_days=1,
         time_limit=100.0,
-        time_estimator=time_estimator,  # type: ignore
+        time_estimator=time_estimator,
         verbose=False,
     )
     fitted, _, metrics = run_simulation(config, seeded_data=seeded_data)

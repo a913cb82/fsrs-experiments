@@ -337,8 +337,6 @@ def _get_estimators_numpy(
 
     # Handle Custom Rating Estimator
     if config.rating_estimator:
-        if not getattr(config.rating_estimator, "_vectorized", False):
-            raise ValueError("Rating estimator must be vectorized.")
         rating_est = config.rating_estimator
     else:
 
@@ -374,12 +372,8 @@ def _get_estimators_numpy(
                 results[review_mask] = results_rev
             return results
 
-        rating_est._vectorized = True
-
     # Handle Custom Time Estimator
     if config.time_estimator:
-        if not getattr(config.time_estimator, "_vectorized", False):
-            raise ValueError("Time estimator must be vectorized.")
         time_est = config.time_estimator
     else:
 
@@ -393,7 +387,7 @@ def _get_estimators_numpy(
         ) -> np.ndarray[Any, Any]:
             return cast(np.ndarray[Any, Any], avg_durations[ratings])
 
-        time_est._vectorized = True
+    return rating_est, time_est
 
     return rating_est, time_est
 
